@@ -1,6 +1,17 @@
+//! # The Shadow Stack
+//!
+//! Unlike many GC algorithms which rely on a cooperative code generator to compile stack maps, this algorithm
+//! carefully maintains a linked list of stack roots. This so-called "shadow stack" mirrors the machine stack.
+//! Maintaining this data structure is slower than using a stack map compiled into the executable as constant data,
+//! but has a significant portability advantage because it requires no special support from the target code generator,
+//! and does not require tricky platform-specific code to crawl the machine stack.
+
 use super::*;
+use std::ops::{Deref, DerefMut};
 use std::{marker::PhantomData, ptr::NonNull};
 
+/// The map for a single function's stack frame. It is compiled as a constant
+/// for each invocation of [gc_frame!].
 #[repr(C)]
 pub struct FrameMap<const N: usize> {
     pub num_roots: u32,
@@ -27,6 +38,8 @@ impl<const N: usize> FrameMap<N> {
     }
 }
 
+/// A link in the dynamic shadow stack. One of these is embedded in
+/// the stack frame of each function on the call stack.
 #[repr(C)]
 pub struct StackEntry<const N: usize> {
     pub next: *mut StackEntry<0>,
@@ -63,10 +76,12 @@ impl<const N: usize> StackEntry<N> {
 
 pub type StackChain = *mut StackEntry<0>;
 
+/// Pushes stack entry into stack entry chain
 #[inline]
 pub unsafe fn push_gcframe(root: &mut StackChain, frame: *mut StackEntry<0>) {
     *root = frame;
 }
+/// Pops stack entry from stack entry chain
 #[inline]
 pub unsafe fn pop_gcframe(root: &mut StackChain, frame: *mut StackEntry<0>) {
     debug_assert!(!root.is_null());
@@ -74,9 +89,10 @@ pub unsafe fn pop_gcframe(root: &mut StackChain, frame: *mut StackEntry<0>) {
     *root = (**root).next;
 }
 
+/// Visits each stack entry registered in `root` chain.
 pub unsafe fn visit_roots<F>(root: StackChain, mut vis: F)
 where
-    F: FnMut(*mut *const u8, *const u8),
+    F: FnMut(*mut *mut u8, *const u8),
 {
     let mut entry = root;
     while !entry.is_null() {
@@ -84,7 +100,7 @@ where
         let metas = (*entry).map.as_ref().metas();
         for (i, root) in roots.iter().copied().enumerate() {
             vis(
-                root as *mut *const u8,
+                root as *mut *mut u8,
                 metas.get(i).copied().unwrap_or_else(core::ptr::null),
             );
         }
@@ -93,6 +109,8 @@ where
     }
 }
 
+/// Simple struct that holds stack entry and entire stack chain. It automatically
+/// pops its stack entry from stack chain when dropped
 pub struct GcFrameRegistration<'a> {
     frame: *mut StackEntry<0>,
     chain: *mut StackChain,
@@ -161,24 +179,30 @@ macro_rules! count {
     ( $x:tt $($xs:tt)* ) => (1usize + $crate::count!($($xs)*));
 }
 #[inline]
-pub const fn get_root_meta_of<T: Rootable>(_: &T) -> *const u8 {
+pub const fn get_root_meta_of<T: Rootable>() -> *const u8 {
     T::METADATA
 }
 
+unsafe impl<const N: usize> Send for FrameMap<N> {}
+unsafe impl<const N: usize> Sync for FrameMap<N> {}
+
+/// Constructs frame of GCed variables on stack. All variables remain rooted until end of the scope.
 #[macro_export]
 macro_rules! gc_frame {
-    ($chain: expr => $($i: ident),*) => {
+    ($chain: expr => $($i: ident: $t: ty),*) => {
+        let stack_entry ={
+            const __ROOT_COUNT: usize = $crate::count!($($i)*);
+            static __FRAME_MAP: $crate::memory::roots::FrameMap<{__ROOT_COUNT}>  = $crate::memory::roots::FrameMap::new(__ROOT_COUNT as u32,[
+                $(
+                    $crate::memory::roots::get_root_meta_of::<$t>()
+                ),*
+            ]);
 
-        let frame_map = $crate::memory::roots::FrameMap::new($crate::count!($($i)*) as u32,[
-            $(
-                $crate::memory::roots::get_root_meta_of(&$i)
-            ),*
-        ]);
-
-        #[allow(unused_unsafe)]
-        let stack_entry = unsafe {$crate::memory::roots::StackEntry::new(*$chain, &frame_map, [
-            $( &mut $i as *mut _ as *mut u8 ),*
-        ])};
+            #[allow(unused_unsafe)]
+            unsafe {$crate::memory::roots::StackEntry::new(*$chain, &__FRAME_MAP, [
+                $( &mut $i as *mut _ as *mut u8 ),*
+            ])}
+        };
 
         #[allow(unused_unsafe)]
         let _stack_entry_registration = unsafe{$crate::memory::roots::GcFrameRegistration::new($chain,&stack_entry)};
@@ -191,13 +215,24 @@ macro_rules! gc_frame {
         $crate::gc_frame!(@parse $stack_entry, ($n + 1), $($is)*)
     };
 
-    (@parse $stack_entry: ident, $n: expr,) => {
-
-    };
+    (@parse $stack_entry: ident, $n: expr,) => {};
 }
 
 pub unsafe fn gcroot_of_type<T: Rootable>(ptr: *const u8, _to: &T) -> Rooted<T> {
     Rooted {
         value: ptr as *const *const u8 as *mut T,
+    }
+}
+
+impl<T: Trace> Deref for Rooted<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl<T: Trace> DerefMut for Rooted<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut()
     }
 }

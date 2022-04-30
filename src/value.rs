@@ -1,6 +1,7 @@
+use core::fmt;
 use std::{
     hash::{Hash, Hasher},
-    ops::Index,
+    ops::{Index, IndexMut},
 };
 
 use fxhash::FxHasher64;
@@ -12,6 +13,7 @@ use crate::{
         gcwrapper::{Array, Gc, Nullable, Str},
         Allocation, Finalize, Object, Trace, Visitor,
     },
+    opcode::Op,
     vm::VM,
 };
 
@@ -36,6 +38,14 @@ pub enum Value {
     Object(Gc<Obj>),
     Table(Gc<Table>),
 }
+
+impl PartialEq for Value {
+    fn eq(&self, _v: &Value) -> bool {
+        true
+    }
+}
+
+impl Eq for Value {}
 
 impl Value {
     pub fn int(self) -> i64 {
@@ -71,10 +81,17 @@ impl Value {
             _ => panic!("type error: array expected"),
         }
     }
-    pub fn module(self) -> Gc<Module> {
+    pub fn module(self) -> Nullable<Module> {
         match self {
-            Self::Module(x) => x,
-            _ => panic!("type error: module expected"),
+            Self::Module(x) => x.nullable(),
+            _ => Nullable::NULL,
+        }
+    }
+
+    pub fn prim_or_func(self) -> Gc<Function> {
+        match self {
+            Self::Function(x) | Self::Primitive(x) => x,
+            _ => panic!("type error: primitive or function expected"),
         }
     }
 
@@ -84,6 +101,18 @@ impl Value {
             Self::Null => false,
             Self::Int(x) => x != 0,
             _ => true,
+        }
+    }
+
+    pub fn is_numeric(self) -> bool {
+        matches!(self, Self::Float(_) | Self::Int(_))
+    }
+
+    pub fn get_number(self) -> f64 {
+        match self {
+            Self::Int(x) => x as f64,
+            Self::Float(y) => y,
+            _ => unreachable!(),
         }
     }
 }
@@ -111,7 +140,7 @@ pub struct Function {
     pub varsize: bool,
     pub env: Value,
     pub addr: usize,
-    pub module: Value,
+    pub module: Nullable<Module>,
 }
 
 unsafe impl Trace for Function {
@@ -127,11 +156,11 @@ impl Object for Function {}
 #[repr(C)]
 pub struct Module {
     pub name: Value,
-    pub globals: Gc<Array<Value>>,
+    pub globals: Nullable<Array<Value>>,
     pub exports: Value,
     pub loader: Value,
     pub code_size: usize,
-    pub code: [u8; 0],
+    pub code: [Op; 0],
 }
 unsafe impl Allocation for Module {
     const LIGHT_FINALIZER: bool = false;
@@ -139,7 +168,7 @@ unsafe impl Allocation for Module {
     const VARSIZE: bool = true;
     const VARSIZE_OFFSETOF_LENGTH: usize = offset_of!(Module, code_size);
     const VARSIZE_OFFSETOF_VARPART: usize = offset_of!(Module, code);
-    const VARSIZE_ITEM_SIZE: usize = 1;
+    const VARSIZE_ITEM_SIZE: usize = std::mem::size_of::<Op>();
 }
 unsafe impl Trace for Module {
     fn trace(&mut self, vis: &mut dyn Visitor) {
@@ -147,6 +176,12 @@ unsafe impl Trace for Module {
         self.globals.trace(vis);
         self.exports.trace(vis);
         self.loader.trace(vis);
+
+        for i in 0..self.code_size {
+            if let Op::AccBuiltinResolved(ref mut val) = self[i] {
+                val.trace(vis);
+            }
+        }
     }
 }
 unsafe impl Finalize for Module {}
@@ -156,6 +191,16 @@ impl Object for Module {}
 pub struct Table {
     count: usize,
     cells: Gc<Array<Nullable<Cell>>>,
+}
+
+impl Table {
+    pub fn new(vm: &mut VM, cap: usize) -> Gc<Self> {
+        let table = vm.gc().array(cap, Nullable::NULL);
+        vm.gc().fixed(Self {
+            count: 0,
+            cells: table,
+        })
+    }
 }
 
 impl Gc<Table> {
@@ -196,6 +241,7 @@ impl Gc<Table> {
         self.insert_slow(vm, *key, *value, hash, position);
         true
     }
+
     fn insert_slow(
         &mut self,
         vm: &mut VM,
@@ -204,7 +250,7 @@ impl Gc<Table> {
         hash: u64,
         mut pos: usize,
     ) {
-        gc_frame!(vm.gc().roots() => key,value);
+        gc_frame!(vm.gc().roots() => key: Value,value: Value);
         if self.count >= (self.cells.len() as f64 * 0.75) as usize {
             self.resize(vm);
             pos = (hash % self.cells.len() as u64) as usize;
@@ -443,14 +489,25 @@ pub struct Obj {
     proto: Option<Gc<Self>>,
 }
 
+impl Obj {
+    pub fn new(vm: &mut VM) -> Gc<Obj> {
+        let table = Table::new(vm, 2);
+        vm.gc().fixed(Obj { table, proto: None })
+    }
+    pub fn with_capacity(vm: &mut VM, cap: usize) -> Gc<Obj> {
+        let table = Table::new(vm, cap);
+        vm.gc().fixed(Obj { table, proto: None })
+    }
+}
+
 impl Gc<Obj> {
     pub fn field(&self, vm: &mut VM, field: &Value) -> Value {
         let mut o = Some(*self);
 
-        gc_frame!(vm.gc().roots() => o);
+        gc_frame!(vm.gc().roots() => o: Option<Gc<Obj>>);
         while let Some(mut obj) = o.get() {
             let mut found = false;
-            gc_frame!(vm.gc().roots() => obj);
+            gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
             let f = obj.as_ref().table.lookup(vm, field, &mut found);
             if found {
                 return f;
@@ -459,6 +516,11 @@ impl Gc<Obj> {
             o.set(obj.as_ref().proto);
         }
         Value::Null
+    }
+
+    pub fn insert(&mut self, vm: &mut VM, key: &Value, val: &Value) {
+        self.table.insert(vm, key, val);
+        vm.gc().write_barrier(*self);
     }
 }
 
@@ -472,8 +534,48 @@ unsafe impl Finalize for Obj {}
 impl Object for Obj {}
 
 impl Index<usize> for Module {
-    type Output = u8;
+    type Output = Op;
     fn index(&self, ix: usize) -> &Self::Output {
         unsafe { &*self.code.as_ptr().add(ix) }
+    }
+}
+impl IndexMut<usize> for Module {
+    fn index_mut(&mut self, ix: usize) -> &mut Self::Output {
+        unsafe { &mut *self.code.as_mut_ptr().add(ix) }
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Null => write!(f, "null"),
+            Self::Int(x) => write!(f, "{}", x),
+            Self::Float(x) => write!(f, "{}", x),
+            Self::Abstract(x) => write!(f, "<abstract {:p}>", *x),
+            Self::Object(x) => write!(f, "<object {:p}>", *x),
+            Self::Array(x) => write!(f, "<array {:p}: {}>", *x, x.len()),
+            Self::Bool(x) => write!(f, "{}", x),
+            Self::Str(x) => write!(f, "{}", &***x),
+            Self::Table(x) => write!(f, "<table {:p}: {}>", *x, x.count),
+            Self::Module(x) => write!(f, "<module {:p}>", *x),
+            Self::Function(x) | Self::Primitive(x) => write!(f, "<func {:p}>", *x),
+        }
+    }
+}
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Null => write!(f, "null"),
+            Self::Int(x) => write!(f, "{}", x),
+            Self::Float(x) => write!(f, "{}", x),
+            Self::Abstract(x) => write!(f, "<abstract {:p}>", *x),
+            Self::Object(x) => write!(f, "<object {:p}>", *x),
+            Self::Array(x) => write!(f, "<array {:p}: {}>", *x, x.len()),
+            Self::Bool(x) => write!(f, "{}", x),
+            Self::Str(x) => write!(f, "{}", &***x),
+            Self::Table(x) => write!(f, "<table {:p}: {}>", *x, x.count),
+            Self::Module(x) => write!(f, "<module {:p}>", *x),
+            Self::Function(x) | Self::Primitive(x) => write!(f, "<func {:p}>", *x),
+        }
     }
 }

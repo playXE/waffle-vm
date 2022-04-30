@@ -11,8 +11,11 @@ use fxhash::FxHashMap;
 use libc::c_void;
 use libmimalloc_sys::{mi_heap_area_t, mi_heap_t};
 use memmap2::MmapMut;
-use std::{collections::VecDeque, panic::panic_any};
-use std_::{cell::UnsafeCell, intrinsics::unlikely, ptr::null_mut};
+use std::{
+    collections::{HashMap, VecDeque},
+    panic::panic_any,
+};
+use std_::{cell::UnsafeCell, intrinsics::unlikely, mem::replace, ptr::null_mut};
 use sys_info::mem_info;
 
 /// Garbage collector based on minimark.py from RPython.
@@ -51,7 +54,7 @@ pub struct MiniMark {
     next_major_collection_threshold: usize,
     growth_rate_max: f64,
     max_delta: f64,
-    trace_hooks: Vec<Box<dyn FnMut(&mut dyn Visitor)>>,
+    trace_hooks: HashMap<u32, Box<dyn FnMut(&mut dyn Visitor)>>,
     objects_to_trace: SegmentedVec<*mut HeapObjectHeader>,
     probably_young_objects_with_finalizers: SegmentedVec<*mut ()>,
     old_objects_with_finalizers: SegmentedVec<*mut ()>,
@@ -153,7 +156,7 @@ impl MiniMark {
             old_objects_with_destructors: SegmentedVec::new(),
             old_objects_with_finalizers: SegmentedVec::new(),
             run_finalizers: SegmentedVec::new(),
-            trace_hooks: Vec::new(),
+            trace_hooks: Default::default(),
             young_weakrefs: SegmentedVec::new(),
             next_major_collection_initial: 0,
             next_major_collection_threshold: 0,
@@ -182,7 +185,15 @@ impl MiniMark {
 
         self.set_major_threshold_from(0, 0);
     }
+    pub fn add_trace_callback<F: 'static + FnMut(&mut dyn Visitor)>(&mut self, x: F) -> u32 {
+        let key = self.trace_hooks.len() as u32;
+        self.trace_hooks.insert(key, Box::new(x));
+        key
+    }
 
+    pub fn remove_trace_callback(&mut self, key: u32) -> bool {
+        self.trace_hooks.remove(&key).is_some()
+    }
     fn set_major_threshold_from(&mut self, mut threshold: usize, reserving: usize) -> bool {
         let threshold_max =
             (self.next_major_collection_initial as f64 * self.growth_rate_max).round() as usize;
@@ -311,6 +322,13 @@ impl MiniMark {
         for value in safestack {
             value.trace(&mut YoungTrace { gc: self })
         }
+
+        let mut hooks = replace(&mut self.trace_hooks, HashMap::new());
+
+        for (_, hook) in hooks.iter_mut() {
+            hook(&mut YoungTrace { gc: self });
+        }
+        self.trace_hooks = hooks;
     }
 
     /// Called during a nursery collection
@@ -381,9 +399,11 @@ impl MiniMark {
             } else {
                 None
             };
-            self.collect_roots_in_nursery(safestack);
             self.los.prepare_for_marking(true);
             self.los.begin_marking(false);
+
+            self.collect_roots_in_nursery(safestack);
+
             // visit the "probably young" objects with finalizers.  They
             // always all survive.
             if self.probably_young_objects_with_finalizers.len() > 0 {
@@ -617,6 +637,13 @@ impl MiniMark {
         for object in safestack {
             object.trace(&mut OldTrace { gc: self });
         }
+
+        let mut hooks = replace(&mut self.trace_hooks, HashMap::new());
+
+        for (_, hook) in hooks.iter_mut() {
+            hook(&mut OldTrace { gc: self });
+        }
+        self.trace_hooks = hooks;
     }
 
     pub unsafe fn is_young(&self, obj: *mut HeapObjectHeader) -> bool {

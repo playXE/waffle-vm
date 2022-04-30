@@ -16,6 +16,7 @@ sys-info = "0.9"
 libc = "0.2"
 indexmap = "1.0"
 memoffset = { version = "0.6", features = ["unstable_const"] }
-
+lexpr = '0.2'
+byteorder = "1.4"
 [profile.release]
 lto = "fat"

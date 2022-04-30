@@ -7,8 +7,10 @@ pub mod los;
 pub mod minimark;
 pub mod minimarkpage;
 pub mod roots;
+pub mod roots_v2;
 #[macro_use]
 pub mod support;
+pub mod gen;
 #[repr(C)]
 pub struct HeapObjectHeader {
     hdr: HDR,
@@ -101,18 +103,8 @@ pub struct VTable {
     /// Set to true when type finalizer cannot revive object i.e when finalizer is equal to `T::drop`
     pub light_finalizer: bool,
     pub type_id: TypeId,
+    pub type_name: &'static str,
 }
-
-pub struct VarSize {
-    pub itemsize: usize,
-    pub offset_of_length: usize,
-    pub offset_of_variable_part: usize,
-}
-
-use core_extensions::*;
-use std_::mem::size_of;
-
-use self::gcwrapper::{Gc, WeakRef};
 
 quasiconst! {
     pub const VTABLE<T: 'static + Allocation>: &'static VTable = &VTable {
@@ -128,9 +120,21 @@ quasiconst! {
         trace: trace_erased::<T>,
         finalize:if T::VARSIZE { Some(finalize_erased::<T>) } else { None },
         light_finalizer: T::LIGHT_FINALIZER,
-        type_id: TypeId::of::<T>()
+        type_id: TypeId::of::<T>(),
+        type_name: std::any::type_name::<T>()
     };
 }
+
+pub struct VarSize {
+    pub itemsize: usize,
+    pub offset_of_length: usize,
+    pub offset_of_variable_part: usize,
+}
+
+use core_extensions::*;
+use std_::mem::size_of;
+
+use self::gcwrapper::{Gc, WeakRef};
 
 extern "C" fn finalize_erased<T: Finalize>(ptr: *mut ()) {
     unsafe {

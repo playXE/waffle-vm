@@ -8,14 +8,19 @@
     const_mut_refs,
     const_ptr_offset_from,
     const_refs_to_cell,
-    try_trait_v2
+    try_trait_v2,
+    box_patterns
 )]
 #![allow(incomplete_features)]
 
 use memory::gcwrapper::{GCWrapper, Gc};
 
+pub mod builtin;
+pub mod bytecode;
 pub mod memory;
 pub mod opcode;
+pub mod reflect;
+pub mod support;
 pub mod value;
 pub mod vm;
 #[derive(Clone, Copy, PartialEq, Eq)]

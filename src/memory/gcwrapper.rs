@@ -11,6 +11,7 @@ use super::{
 };
 use std::{marker::PhantomData, ptr::NonNull};
 
+#[repr(transparent)]
 pub struct Gc<T: Object + ?Sized> {
     pub(crate) header: NonNull<HeapObjectHeader>,
     marker: PhantomData<*mut T>,
@@ -199,7 +200,13 @@ impl GCWrapper {
             uninit.assume_init()
         }
     }
+    pub fn add_trace_callback<F: 'static + FnMut(&mut dyn Visitor)>(&mut self, x: F) -> u32 {
+        self.0.add_trace_callback(x)
+    }
 
+    pub fn remove_trace_callback(&mut self, key: u32) -> bool {
+        self.0.remove_trace_callback(key)
+    }
     pub fn roots(&self) -> *mut StackChain {
         self.0.roots.get()
     }
@@ -502,7 +509,7 @@ mod tests {
         let p2 = gc.fixed(44i32);
         let mut w1 = gc.weak(p);
         let mut w2 = gc.weak(p2);
-        gc_frame!(gc.roots() => p, w1, w2);
+        gc_frame!(gc.roots() => p: Gc<i32>, w1: WeakRef<i32>, w2 : WeakRef<i32>);
 
         gc.minor_collection(&mut []);
 
@@ -519,7 +526,7 @@ mod tests {
     fn weak_refs_generational() {
         let mut gc = GCWrapper::new();
         let mut p = gc.array(1, None);
-        gc_frame!(gc.roots() => p);
+        gc_frame!(gc.roots() => p: Option<Gc<i32>>);
         gc.minor_collection(&mut []); // `p` should be now in old space
         {
             // without write-barrier weak ref should become null
@@ -566,3 +573,5 @@ unsafe impl<const N: usize, T: Trace> Trace for [T; N] {
         }
     }
 }
+
+unsafe impl Trace for () {}
