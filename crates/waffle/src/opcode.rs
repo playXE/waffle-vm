@@ -66,5 +66,6 @@ pub enum Op {
     ToNum,
     Loop,
     Leave,
+    Ctor(i32),
     Last,
 }

@@ -2,12 +2,14 @@ use crate::{
     gc_frame,
     memory::{
         gcwrapper::{GCWrapper, Gc, Nullable},
+        minimark::read_uint_from_env,
         Object, Trace, Visitor,
     },
     opcode::Op,
-    value::{Function, Module, Obj, Value, INVALID_CMP},
+    value::{Function, Module, Obj, Sym, Value, INVALID_CMP},
 };
 use std::{
+    hash::{Hash, Hasher},
     mem::size_of,
     panic::{self, catch_unwind, resume_unwind, AssertUnwindSafe},
     ptr::null_mut,
@@ -18,7 +20,7 @@ pub struct VM {
 
     sp: *mut Value,
     csp: *mut Value,
-    vthis: Value,
+    pub(crate) vthis: Value,
     env: Value,
 
     spmin: *mut Value,
@@ -31,7 +33,21 @@ pub struct VM {
     trace_hook: u32,
 
     pub(crate) builtins: Value,
+    symtab: Box<[Option<Gc<Sym>>]>,
+    ids: [Option<Gc<Sym>>; Id::Last as u8 as usize],
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+#[repr(u8)]
+pub enum Id {
+    Loader,
+    Exports,
+    Cache,
+    Path,
+    Last,
+}
+
+static IDS: &'static [&'static str] = &["loader", "exports", "cache", "path"];
 
 unsafe impl Trace for VM {
     fn trace(&mut self, vis: &mut dyn Visitor) {
@@ -58,13 +74,46 @@ unsafe impl Trace for VM {
             self.callback_ret.trace(vis);
             self.exc_stack.trace(vis);
             self.builtins.trace(vis);
+            for sym in self.symtab.iter_mut() {
+                sym.trace(vis);
+            }
+            for id in self.ids.iter_mut() {
+                id.trace(vis);
+            }
         }
     }
 }
 
 impl VM {
     pub const STACK_SIZE: usize = 256;
+
+    pub fn intern(&mut self, name: impl AsRef<str>) -> Gc<Sym> {
+        let name = name.as_ref();
+        let mut hasher = FxHasher64::default();
+        name.hash(&mut hasher);
+        let hash = hasher.finish();
+        let pos = (hash % self.symtab.len() as u64) as usize;
+        let mut node = self.symtab[pos];
+        while let Some(sym) = node {
+            if &**sym.name == name {
+                return sym;
+            }
+            node = sym.next;
+        }
+
+        let str = self.gc().str(name);
+        let mut sym = self.gc().fixed(Sym {
+            next: None,
+            name: str,
+        });
+        sym.next = self.symtab[pos];
+        self.symtab[pos] = Some(sym);
+
+        sym
+    }
+
     pub fn new(stack_size: Option<usize>) -> &'static mut VM {
+        let symtab_size = read_uint_from_env("WAFFLE_SYMTAB_SIZE").unwrap_or_else(|| 128);
         let mut this = Box::leak(Box::new(VM {
             gc: GCWrapper::new(),
             env: Value::Null,
@@ -79,6 +128,8 @@ impl VM {
             trace_hook: u32::MAX,
             trap: 0,
             builtins: Value::Null,
+            symtab: vec![None; symtab_size].into_boxed_slice(),
+            ids: [None; Id::Last as usize],
         }));
 
         let stack_size = stack_size.unwrap_or_else(|| VM::STACK_SIZE);
@@ -103,9 +154,17 @@ impl VM {
         let (f, m) = callback_return(this);
         this.callback_ret = f.nullable();
         this.callback_mod = m.nullable();
+        for (i, id) in IDS.iter().enumerate() {
+            let s = this.intern(id);
+            this.ids[i] = Some(s);
+        }
         super::builtin::init_builtin(&mut this);
         this.gc().collect(0, &mut []);
         this
+    }
+
+    pub fn id(&mut self, id: Id) -> Gc<Sym> {
+        self.ids[id as usize].unwrap()
     }
 
     pub fn gc(&mut self) -> &mut GCWrapper {
@@ -268,7 +327,7 @@ impl VM {
         unsafe { self.callex(this, f, args.as_ref(), &mut None) }
     }
     /// Implements function call
-    unsafe fn callex(
+    pub unsafe fn callex(
         &mut self,
         mut vthis: Value,
         mut f: Value,
@@ -289,7 +348,7 @@ impl VM {
                 Value::Primitive(x) => {
                     self.env = x.env;
                     ret =
-                        dispatch_func(self, args.as_ptr() as _, x.addr, args.len() as _, x.varsize)
+                        dispatch_func2(self, args.as_ptr() as _, x.addr, args.len() as _, x.varsize)
                 }
                 Value::Function(x) => {
                     if args.len() == x.nargs as usize {
@@ -393,6 +452,7 @@ impl VM {
         ret
     }
 }
+use fxhash::FxHasher64;
 use std::mem::transmute;
 use Op::*;
 #[inline(never)]
@@ -440,6 +500,53 @@ unsafe fn dispatch_func(
                 _,
                 extern "C" fn(&mut VM, &Value, &Value, &Value, &Value, &Value) -> Value,
             >(f))(vm, &*sp.add(4), &*sp.add(3), &*sp.add(2), &*sp.add(1), &*sp),
+
+            _ => todo!(),
+        }
+    }
+}
+
+#[inline(never)]
+unsafe fn dispatch_func2(
+    vm: &mut VM,
+    mut sp: *mut Value,
+    f: usize,
+    nargs: u32,
+    varsize: bool,
+) -> Value {
+    if varsize {
+        let f = transmute::<_, fn(&mut VM, &[Value]) -> Value>(f);
+        let mut args = vm.gc().array(nargs as _, Value::Null);
+
+        sp = sp.add(nargs as _);
+        for i in 0..nargs as usize {
+            args[i] = sp.add(i).read();
+        }
+
+        vm.gc().write_barrier(args);
+        return f(vm, &args);
+    } else {
+        match nargs {
+            0 => (transmute::<_, extern "C" fn(&mut VM) -> Value>(f))(vm),
+            1 => (transmute::<_, extern "C" fn(&mut VM, &Value) -> Value>(f))(vm, &*sp),
+            2 => (transmute::<_, extern "C" fn(&mut VM, &Value, &Value) -> Value>(f))(
+                vm,
+                &*sp,
+                &*sp.add(1),
+            ),
+            3 => (transmute::<_, extern "C" fn(&mut VM, &Value, &Value, &Value) -> Value>(f))(
+                vm,
+                &*sp,
+                &*sp.add(1),
+                &*sp.add(2),
+            ),
+            4 => (transmute::<_, extern "C" fn(&mut VM, &Value, &Value, &Value, &Value) -> Value>(
+                f,
+            ))(vm, &*sp.add(1), &*sp.add(2), &*sp.add(3), &*sp),
+            5 => (transmute::<
+                _,
+                extern "C" fn(&mut VM, &Value, &Value, &Value, &Value, &Value) -> Value,
+            >(f))(vm, &*sp, &*sp.add(1), &*sp.add(2), &*sp.add(3), &*sp.add(4)),
 
             _ => todo!(),
         }
@@ -519,7 +626,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
 
     macro_rules! object_op {
         ($obj: expr,$param: expr,$id: expr,$err: expr) => {
-            let id = Value::Str(vm.gc().str(stringify!($id)));
+            let id = Value::Symbol(vm.intern(stringify!($id)));
             let f = $obj.field(vm, &id);
             match f {
                 Value::Null => $err,
@@ -577,11 +684,27 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
             }
         };
     }
+    macro_rules! test {
+        ($op: tt) => {{
+            save!();
+            let tmp = crate::value::value_cmp(vm, &*sp, acc.as_ref());
+            restore!();
+            sp.write(Value::Null);
+            sp = sp.add(1);
+            match tmp {
+                Value::Int(x) => {
+                    acc.set(Value::Bool(x $op 0 && x != INVALID_CMP as i64));
+                }
+                _ => unreachable!()
+            }
+        }};
+    }
     loop {
         unsafe {
             let op = m.get()[ip];
             let op = std::mem::transmute::<_, Op>(op);
-            //println!("{}: {:?}", ip, op);
+
+            println!("{}: {:?}", ip, op);
             ip += 1;
             match op {
                 AccNull => {
@@ -612,7 +735,8 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                     match object {
                         Value::Object(mut object) => {
                             gc_frame!(vm.gc().roots() => object: Gc<Obj>,name: Value);
-                            acc.set(object.as_ref().table.lookup(vm, name.as_ref(), &mut false));
+                            let tmp = object.field(vm, &name);
+                            acc.set(tmp);
                         }
 
                         _ => vm.throw_str("invalid field access"),
@@ -684,7 +808,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                 SetField(ix) => {
                     let field = &m.globals[ix as usize];
                     match &mut *sp {
-                        Value::Object(object) => object.table.insert(vm, field, acc.as_ref()),
+                        Value::Object(object) => object.insert(vm, field, acc.as_ref()),
                         _ => vm.throw_str("invalid field access"),
                     };
 
@@ -701,8 +825,8 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                             }
                         }
                         (Value::Object(obj), arg0) => {
-                            let string = vm.gc().str("__set");
-                            let mut f = obj.field(vm, &Value::Str(string));
+                            let string = vm.intern("__set");
+                            let mut f = obj.field(vm, &Value::Symbol(string));
                             if matches!(f, Value::Null) {
                                 vm.throw_str("unsupported operation");
                             }
@@ -1019,6 +1143,12 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                     }
                     _ => vm.throw_str("wrong operands for <<"),
                 },
+                Eq => test!(==),
+                Neq => test!(!=),
+                Gt => test!(>),
+                Gte => test!(>=),
+                Lt => test!(<),
+                Lte => test!(<=),
                 Leave | Last => break,
 
                 _ => todo!("{:?}", op),

@@ -17,6 +17,7 @@ use memory::gcwrapper::{GCWrapper, Gc};
 
 pub mod builtin;
 pub mod bytecode;
+pub mod load;
 pub mod memory;
 pub mod opcode;
 pub mod reflect;

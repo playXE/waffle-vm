@@ -13,6 +13,7 @@ use std::rc::Rc;
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Global {
     Str(Box<str>),
+    Symbol(Box<str>),
     Float(u64),
     Int(i64),
     Var(Box<str>),
@@ -265,7 +266,7 @@ impl<'a> Context<'a> {
 
     pub fn compile_function<R>(
         &mut self,
-        params: &[String],
+        params: &[Box<str>],
         mut cb: impl FnMut(&mut Context) -> Result<R, String>,
     ) -> Result<R, String> {
         let mut locals = self.locals.clone();
@@ -287,7 +288,7 @@ impl<'a> Context<'a> {
 
         for p in params {
             ctx.stack += 1;
-            ctx.locals.insert(p.clone(), ctx.stack as _);
+            ctx.locals.insert(p.clone().to_string(), ctx.stack as _);
         }
         let s = ctx.stack;
         let ret = cb(&mut ctx)?;
@@ -510,6 +511,10 @@ pub fn make_module(vm: &mut VM, globals: &[Rc<Global>], ops: &[Op]) -> Gc<Module
                 Global::Int(x) => m.globals[i] = Value::Int(*x),
                 Global::Str(x) => {
                     m.globals[i] = Value::Str(vm.gc().str(x));
+                    vm.gc().write_barrier(m.get());
+                }
+                Global::Symbol(x) => {
+                    m.globals[i] = Value::Symbol(vm.intern(x));
                     vm.gc().write_barrier(m.get());
                 }
                 Global::Func(addr, nargs) => {

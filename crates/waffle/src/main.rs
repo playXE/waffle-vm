@@ -1,35 +1,44 @@
-use std::rc::Rc;
+use std::panic::AssertUnwindSafe;
 
-use lexpr::*;
 use waffle::{
-    bytecode::write_module,
-    gc_frame,
-    memory::gcwrapper::Gc,
-    opcode::Op,
-    reflect::{disassembly, make_module, Context, Global},
-    value::Module,
-    vm::VM,
+    gc_frame, load::waffle_default_loader, memory::minimark::MemoryError, value::Value, vm::VM,
 };
-fn main() {
-    let reader = std::fs::read_to_string("file.scm").unwrap();
-    let r = lexpr::Parser::from_str(&reader);
+fn main() -> Result<(), String> {
+    let mut vm = VM::new(None);
+    let fname = std::env::args()
+        .nth(1)
+        .ok_or_else(|| format!("filename not specified"))?;
 
-    let (globals, ops) = Compiler::compile(r).unwrap();
-    let vm = VM::new(None);
-    println!("{}", disassembly(&globals, &ops));
-    let bytes = write_module(&ops, &globals);
-    std::fs::write("file.bc", &bytes).unwrap();
-    println!("{:?}", bytes);
-    let mut module = make_module(vm, &globals, &ops);
-    gc_frame!(vm.gc().roots() => module: Gc<Module>);
-    let val = vm.execute(module.get());
+    let mut mload = waffle_default_loader(&mut vm);
+    let mut args = [Value::Null, mload];
 
-    match val {
-        Ok(x) => println!("{}", x),
-        Err(e) => println!("error: {}", e),
+    gc_frame!(vm.gc().roots() => args: [Value;2],mload: Value);
+
+    args[0] = Value::Str(vm.gc().str(fname));
+
+    let key = Value::Symbol(vm.intern("loadmodule"));
+    let f = mload.field(vm, &key);
+    let mut exc = None;
+    let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        unsafe {
+            vm.callex(mload.get(), f, &args.get(), &mut exc);
+        }
+        if let Some(exc) = exc {
+            eprintln!("exception thrown: {}", exc);
+        }
+    }));
+
+    match res {
+        Ok(_) => {}
+        Err(e) if e.is::<MemoryError>() => {
+            eprintln!("out of memory");
+        }
+        Err(e) => std::panic::resume_unwind(e),
     }
+    Ok(())
 }
 
+/*
 pub struct Compiler<'a, 'b> {
     ctx: &'b mut Context<'a>,
 }
@@ -80,7 +89,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     let mut acc_builtin = || {
                         let x = self
                             .ctx
-                            .global(Rc::new(Global::Str(x.to_string().into_boxed_str())));
+                            .global(Rc::new(Global::Symbol(x[1..].to_string().into_boxed_str())));
                         self.ctx.write(Op::AccBuiltin(x as _));
 
                         Ok(())
@@ -392,3 +401,4 @@ fn str_to_op(op: &str) -> Op {
         _ => unreachable!(),
     }
 }
+*/

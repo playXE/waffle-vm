@@ -30,6 +30,7 @@ pub enum Value {
     Int(i64),
     Float(Float),
     Str(Gc<Str>),
+    Symbol(Gc<Sym>),
     Array(Gc<Array<Value>>),
     Abstract(Gc<dyn Object>),
     Module(Gc<Module>),
@@ -38,6 +39,21 @@ pub enum Value {
     Object(Gc<Obj>),
     Table(Gc<Table>),
 }
+
+pub struct Sym {
+    pub(crate) next: Option<Gc<Sym>>,
+    pub(crate) name: Gc<Str>,
+}
+
+impl Object for Sym {}
+unsafe impl Trace for Sym {
+    fn trace(&mut self, visitor: &mut dyn Visitor) {
+        self.next.trace(visitor);
+        self.name.trace(visitor);
+    }
+}
+unsafe impl Finalize for Sym {}
+unsafe impl Allocation for Sym {}
 
 impl PartialEq for Value {
     fn eq(&self, _v: &Value) -> bool {
@@ -48,6 +64,18 @@ impl PartialEq for Value {
 impl Eq for Value {}
 
 impl Value {
+    pub fn field(&self, vm: &mut VM, key: &Value) -> Value {
+        match self {
+            Self::Object(obj) => obj.field(vm, key),
+            _ => vm.throw_str("not an object"),
+        }
+    }
+    pub fn set_field(&mut self, vm: &mut VM, key: &Value, value: &Value) {
+        match self {
+            Self::Object(obj) => obj.insert(vm, key, value),
+            _ => vm.throw_str("not an object"),
+        }
+    }
     pub fn int(self) -> i64 {
         match self {
             Self::Int(x) => x,
@@ -126,7 +154,7 @@ unsafe impl Trace for Value {
             Self::Table(x) => x.trace(vis),
             Self::Function(x) | Self::Primitive(x) => x.trace(vis),
             Self::Object(x) => x.trace(vis),
-
+            Self::Symbol(x) => x.trace(vis),
             _ => (),
         }
     }
@@ -172,7 +200,6 @@ unsafe impl Allocation for Module {
 }
 unsafe impl Trace for Module {
     fn trace(&mut self, vis: &mut dyn Visitor) {
-        self.name.trace(vis);
         self.globals.trace(vis);
         self.exports.trace(vis);
         self.loader.trace(vis);
@@ -400,6 +427,10 @@ pub fn value_hash(vm: &mut VM, value: &Value) -> Value {
             12i64.hash(&mut hasher);
             x.hash(&mut hasher);
         }
+        Value::Symbol(x) => {
+            13i64.hash(&mut hasher);
+            vm.gc().identity(*x).hash(&mut hasher);
+        }
     }
 
     Value::Int(hasher.finish() as _)
@@ -469,15 +500,37 @@ pub fn value_cmp(vm: &mut VM, a: &Value, b: &Value) -> Value {
             if vm.identity_cmp(a, b) == 0 {
                 0
             } else {
-                // todo: invoke __eq method
+                let s = vm.intern("__compare");
+                let tmp = a.field(vm, &Value::Symbol(s));
+                if !matches!(tmp, Value::Function(_) | Value::Primitive(_)) {
+                    INVALID_CMP
+                } else {
+                    let a = vm.call2(tmp, Value::Object(a), Value::Object(b));
+                    match a {
+                        Value::Int(x) => x,
+                        _ => INVALID_CMP,
+                    }
+                }
+            }
+        }
+        (Value::Object(a), b) => {
+            let s = vm.intern("__compare");
+            let tmp = a.field(vm, &Value::Symbol(s));
+            if !matches!(tmp, Value::Function(_) | Value::Primitive(_)) {
                 INVALID_CMP
+            } else {
+                let a = vm.call2(tmp, Value::Object(a), b);
+                match a {
+                    Value::Int(x) => x,
+                    _ => INVALID_CMP,
+                }
             }
         }
 
         (Value::Table(a), Value::Table(b)) => vm.identity_cmp(a, b),
         (Value::Array(a), Value::Array(b)) => vm.identity_cmp(a, b),
         (Value::Abstract(a), Value::Abstract(b)) => vm.identity_cmp(a, b),
-
+        (Value::Symbol(x), Value::Symbol(y)) => vm.identity_cmp(x, y),
         (Value::Module(a), Value::Module(b)) => vm.identity_cmp(a, b),
 
         _ => INVALID_CMP,
@@ -559,6 +612,7 @@ impl fmt::Display for Value {
             Self::Table(x) => write!(f, "<table {:p}: {}>", *x, x.count),
             Self::Module(x) => write!(f, "<module {:p}>", *x),
             Self::Function(x) | Self::Primitive(x) => write!(f, "<func {:p}>", *x),
+            Self::Symbol(x) => write!(f, "{}", &**x.name),
         }
     }
 }
@@ -576,6 +630,7 @@ impl fmt::Debug for Value {
             Self::Table(x) => write!(f, "<table {:p}: {}>", *x, x.count),
             Self::Module(x) => write!(f, "<module {:p}>", *x),
             Self::Function(x) | Self::Primitive(x) => write!(f, "<func {:p}>", *x),
+            Self::Symbol(x) => write!(f, "symbol({})", &**x.name),
         }
     }
 }

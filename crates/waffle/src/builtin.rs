@@ -77,36 +77,36 @@ pub(crate) fn init_builtin(vm: &mut VM) {
     gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
 
     let mut f = make_prim(vm, builtin_acopy as _, 1, false);
-    let mut s = Value::Str(vm.gc().str("$acopy"));
+    let mut s = Value::Symbol(vm.intern("acopy"));
     gc_frame!(vm.gc().roots() => f: Value,s: Value);
     obj.insert(vm, &s, &f);
 
     let mut f = make_prim(vm, builtin_amake as _, 1, false);
-    let mut s = Value::Str(vm.gc().str("$amake"));
+    let mut s = Value::Symbol(vm.intern("amake"));
     gc_frame!(vm.gc().roots() => f: Value,s: Value);
     obj.insert(vm, &s, &f);
 
     let mut f = make_prim(vm, builtin_array as _, 0, true);
-    let mut s = Value::Str(vm.gc().str("$array"));
+    let mut s = Value::Symbol(vm.intern("array"));
     gc_frame!(vm.gc().roots() => f: Value,s: Value);
     obj.insert(vm, &s, &f);
 
     let mut f = make_prim(vm, builtin_asize as _, 1, false);
-    let mut s = Value::Str(vm.gc().str("$asize"));
+    let mut s = Value::Symbol(vm.intern("asize"));
     gc_frame!(vm.gc().roots() => f: Value,s: Value);
     obj.insert(vm, &s, &f);
 
     let mut f = make_prim(vm, builtin_full_gc as _, 0, false);
-    let mut s = Value::Str(vm.gc().str("$fullGC"));
+    let mut s = Value::Symbol(vm.intern("fullGC"));
     gc_frame!(vm.gc().roots() => f: Value,s: Value);
     obj.insert(vm, &s, &f);
 
     let mut f = make_prim(vm, builtin_minor_gc as _, 0, false);
-    let mut s = Value::Str(vm.gc().str("$minorGC"));
+    let mut s = Value::Symbol(vm.intern("minorGC"));
     gc_frame!(vm.gc().roots() => f: Value,s: Value);
     obj.insert(vm, &s, &f);
     let mut f = make_prim(vm, builtin_throw as _, 0, false);
-    let mut s = Value::Str(vm.gc().str("$throw"));
+    let mut s = Value::Symbol(vm.intern("throw"));
     gc_frame!(vm.gc().roots() => f: Value,s: Value);
     obj.insert(vm, &s, &f);
 

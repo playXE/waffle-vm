@@ -732,7 +732,9 @@ impl MiniMark {
     }
 
     pub unsafe fn execute_finalizers(&mut self) {
+        // we do not want to execute finalizers once again if one of finalizer is somehow managed to trigger major collection
         if self.finalize_lock {
+            // happens only if finalizer triggered major collection
             return;
         }
         self.finalize_lock = true;
@@ -858,6 +860,7 @@ impl MiniMark {
         (*obj).set_tid(Tid {
             as_vtable: getconst!(super::VTABLE<A>),
         });
+        (*obj).set_has_shadow(false);
         if A::FINALIZE {
             self.young_objects_with_destructors.push(obj);
         }
@@ -933,7 +936,10 @@ impl MiniMark {
             self.nursery_object_shadows
                 .get(&(obj as usize))
                 .copied()
-                .expect("has_shadow flag is set but no shadow found") as _
+                .expect(&format!(
+                    "has_shadow flag is set but no shadow found for {:p}",
+                    obj
+                )) as _
         } else {
             self.allocate_shadow(obj)
         }
@@ -966,6 +972,7 @@ impl MiniMark {
         (*obj).set_has_shadow(true);
         self.nursery_object_shadows
             .insert(obj as usize, shadowhdr as usize);
+        println!("allocate shadow for {:p}: {:p}", obj, shadowhdr);
         shadowhdr
     }
 

@@ -1,22 +1,2 @@
-[package]
-name = "waffle"
-version = "0.1.0"
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
-libmimalloc-sys = { version = "0.1", features = ["extended"] }
-core_extensions = { version = "1.5", features = ["const_val"] }
-fxhash = "0.2"
-const-bitfield = "0.2"
-memmap2 = "0.5"
-rand = "0.8"
-sys-info = "0.9"
-libc = "0.2"
-indexmap = "1.0"
-memoffset = { version = "0.6", features = ["unstable_const"] }
-lexpr = '0.2'
-byteorder = "1.4"
-[profile.release]
-lto = "fat"
+[workspace]
+members = ["crates/lispy", "crates/waffle"]
