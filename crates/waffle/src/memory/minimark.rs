@@ -673,7 +673,7 @@ impl MiniMark {
             },
         )
     }
-
+    /// Process old -> young pointers
     pub unsafe fn collect_oldrefs_to_nursery<'a>(&'a mut self) {
         let mut vis = YoungTrace { gc: self };
 
@@ -686,6 +686,10 @@ impl MiniMark {
         drop(vis);
     }
 
+    /// Deals with young objects that have finalizers.
+    ///
+    /// # NOTE
+    /// Finalizers are invoked only for mature objects, this pass simply makes any young object with finalizer survive
     pub unsafe fn deal_with_young_objects_with_finalizers(&mut self) {
         while self.probably_young_objects_with_finalizers.len() > 0 {
             let mut obj = NonNull::new_unchecked(
@@ -703,6 +707,7 @@ impl MiniMark {
     }
 
     pub unsafe fn deal_with_young_objects_with_dtors(&mut self) {
+        // Simply iterates objects with destructors and invokes destructor on each of them
         while let Some(obj) = self.young_objects_with_destructors.pop() {
             let tid = (*obj).tid();
             if !self.is_forwarded(obj) {
@@ -717,6 +722,7 @@ impl MiniMark {
         }
     }
     pub unsafe fn deal_with_old_objects_with_dtors(&mut self) {
+        // Simply iterates objects with destructors and invokes destructor on each of them
         let mut new_objects = SegmentedVec::new();
         while let Some(obj) = self.old_objects_with_destructors.pop() {
             if (*obj).is_visited() {
@@ -782,6 +788,7 @@ impl MiniMark {
         result
     }
 
+    /// Allocate memory in large object space, also sometimes used for finalizeable objects
     pub unsafe fn external_malloc<A: 'static + Allocation>(
         &mut self,
         length: usize,
@@ -975,12 +982,14 @@ impl MiniMark {
         println!("allocate shadow for {:p}: {:p}", obj, shadowhdr);
         shadowhdr
     }
+    /// Returns object identity. It is guaranteed to be the same for the same object even if invoked multiple times.
 
     pub fn identity(&mut self, obj: *mut HeapObjectHeader) -> usize {
         if obj.is_null() {
             return 0;
         }
         if self.is_in_nursery(obj.cast()) {
+            // preallocate space in non-moving old space for young object and use that as identity
             unsafe { self.find_shadow(obj) as usize }
         } else {
             obj as usize
