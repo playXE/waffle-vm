@@ -67,8 +67,39 @@ pub extern "C" fn builtin_minor_gc(vm: &mut VM) -> Value {
     Value::Null
 }
 
+/// $throw: any -> !
+///
+/// Throws exception
 pub extern "C" fn builtin_throw(vm: &mut VM, val: &Value) -> Value {
     vm.throw(*val);
+}
+
+/// $new: object | null -> object
+///
+/// Creates new object with specified prototype or no prototype if null
+pub extern "C" fn builtin_new(vm: &mut VM, val: &Value) -> Value {
+    if !matches!(val, Value::Null | Value::Object(_)) {
+        vm.throw_str(&format!(
+            "`new` expects object or null value as argument but `{}` was found",
+            val
+        ));
+    }
+
+    match val {
+        Value::Object(proto) => Value::Object(Obj::with_proto(vm, *proto)),
+        _ => Value::Object(Obj::new(vm)),
+    }
+}
+
+/// $symbol: str | sym -> sym
+///
+/// Interns new symbol
+pub extern "C" fn builtin_symbol(vm: &mut VM, val: &Value) -> Value {
+    match val {
+        Value::Symbol(_) => *val,
+        Value::Str(x) => Value::Symbol(vm.intern(&***x)),
+        _ => vm.throw_str("`symbol` expects string as argument"),
+    }
 }
 
 pub(crate) fn init_builtin(vm: &mut VM) {
@@ -105,8 +136,18 @@ pub(crate) fn init_builtin(vm: &mut VM) {
     let mut s = Value::Symbol(vm.intern("minorGC"));
     gc_frame!(vm.gc().roots() => f: Value,s: Value);
     obj.insert(vm, &s, &f);
-    let mut f = make_prim(vm, builtin_throw as _, 0, false);
+    let mut f = make_prim(vm, builtin_throw as _, 1, false);
     let mut s = Value::Symbol(vm.intern("throw"));
+    gc_frame!(vm.gc().roots() => f: Value,s: Value);
+    obj.insert(vm, &s, &f);
+
+    let mut f = make_prim(vm, builtin_new as _, 1, false);
+    let mut s = Value::Symbol(vm.intern("new"));
+    gc_frame!(vm.gc().roots() => f: Value,s: Value);
+    obj.insert(vm, &s, &f);
+
+    let mut f = make_prim(vm, builtin_symbol as _, 1, false);
+    let mut s = Value::Symbol(vm.intern("symbol"));
     gc_frame!(vm.gc().roots() => f: Value,s: Value);
     obj.insert(vm, &s, &f);
 

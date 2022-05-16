@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use crate::ast::{Expr, ExprKind};
+use crate::ast::{Expr, ExprKind, Import};
 use lexpr::{datum::Span, parse::error::Location, Cons, Datum, Value};
 use std::marker::PhantomData;
 
@@ -335,12 +335,18 @@ impl<'a, R: lexpr::parse::Read<'a>> Parser<'a, R> {
             );
         }
 
-        let field = self.parse_expr(&rest[0])?;
+        let field = rest[0]
+            .as_symbol()
+            .ok_or_else(|| format!("Symbol expected").into_boxed_str())?;
 
         let object = self.parse_expr(&rest[1])?;
         let args = self.parse_array(&rest[2..])?;
         Ok(Box::new(Expr {
-            kind: ExprKind::MethodCall(field, object, args.into_boxed_slice()),
+            kind: ExprKind::MethodCall(
+                field.to_string().into_boxed_str(),
+                object,
+                args.into_boxed_slice(),
+            ),
         }))
     }
 
@@ -370,7 +376,17 @@ impl<'a, R: lexpr::parse::Read<'a>> Parser<'a, R> {
             kind: ExprKind::While(cond, body),
         }))
     }
+    fn parse_set(&mut self, rest: &[Value]) -> Result<Box<Expr>, Box<str>> {
+        if rest.len() != 2 {
+            return Err(format!("malformed set!").into_boxed_str());
+        }
 
+        let expr = self.parse_expr(&rest[0])?;
+        let val = self.parse_expr(&rest[1])?;
+        Ok(Box::new(Expr {
+            kind: ExprKind::Set(expr, val),
+        }))
+    }
     fn parse_define(&mut self, rest: &[Value]) -> Result<Box<Expr>, Box<str>> {
         if rest.len() == 0 {
             return Err(format!("malformed define").into_boxed_str());
@@ -415,6 +431,73 @@ impl<'a, R: lexpr::parse::Read<'a>> Parser<'a, R> {
             .into_boxed_str()),
         }
     }
+
+    fn parse_import(&mut self, rest: &[Value]) -> Result<Box<Expr>, Box<str>> {
+        let mut imports = vec![];
+        for path in rest.iter() {
+            match path {
+                Value::String(str) => imports.push(Import::File(str.to_string())),
+                Value::Cons(_) => {
+                    if !path.is_list() {
+                        return Err(format!(
+                            "(import) expects proper list but '{}' was found",
+                            path
+                        )
+                        .into_boxed_str());
+                    }
+
+                    let ls = path.to_ref_vec().unwrap();
+                    if ls.len() == 0 {
+                        return Err(format!("empty import").into_boxed_str());
+                    }
+                    let mut path = vec![];
+                    for p in ls {
+                        match p {
+                            Value::Symbol(x) => path.push(x.to_string()),
+                            _ => {
+                                return Err(format!(
+                                "(import) expects module name to be a symbol but '{}' was found",
+                                p
+                            )
+                                .into_boxed_str())
+                            }
+                        }
+                    }
+
+                    imports.push(Import::Module(path));
+                }
+                Value::Symbol(x) => imports.push(Import::Module(vec![x.to_string()])),
+                _ => {
+                    return Err(
+                        format!("(import) expects module path but '{}' was found", path)
+                            .into_boxed_str(),
+                    )
+                }
+            }
+        }
+        Ok(Box::new(Expr {
+            kind: ExprKind::Import(imports),
+        }))
+    }
+
+    fn parse_export(&mut self, rest: &[Value]) -> Result<Box<Expr>, Box<str>> {
+        let mut exports = vec![];
+        for val in rest.iter() {
+            match val {
+                Value::Symbol(x) => exports.push(x.to_string()),
+                _ => {
+                    return Err(format!(
+                        "(export) expects symbol as export but '{}' was found",
+                        val
+                    )
+                    .into_boxed_str())
+                }
+            }
+        }
+        Ok(Box::new(Expr {
+            kind: ExprKind::Export(exports),
+        }))
+    }
     fn parse_expr(&mut self, value: &Value) -> Result<Box<Expr>, Box<str>> {
         Ok(match value {
             Value::Bool(x) => Box::new(Expr {
@@ -426,6 +509,15 @@ impl<'a, R: lexpr::parse::Read<'a>> Parser<'a, R> {
             Value::Symbol(sym) => Box::new(Expr {
                 kind: ExprKind::Var(sym.clone()),
             }),
+            Value::Vector(vals) => {
+                let mut vals_ = vec![];
+                for val in vals.iter() {
+                    vals_.push(self.parse_expr(val)?);
+                }
+                Box::new(Expr {
+                    kind: ExprKind::ArrayInit(vals_.into_boxed_slice()),
+                })
+            }
             Value::Cons(_) => {
                 let lst = value.to_vec().ok_or_else(|| {
                     "cons expression is not a valid list"
@@ -444,6 +536,8 @@ impl<'a, R: lexpr::parse::Read<'a>> Parser<'a, R> {
                 match first.as_symbol() {
                     Some(val) => match val {
                         "begin" => return self.parse_begin(rest),
+                        "import" => return self.parse_import(rest),
+                        "export" => return self.parse_export(rest),
                         "let" => return self.parse_let(rest),
                         "letrec" => return self.parse_letrec(rest),
                         "if" => return self.parse_if(rest),
@@ -452,6 +546,7 @@ impl<'a, R: lexpr::parse::Read<'a>> Parser<'a, R> {
                         "define" => return self.parse_define(rest),
                         ":" => return self.parse_field(rest),
                         ":-" => return self.parse_method_call(rest),
+                        "set!" => return self.parse_set(rest),
                         x if x.starts_with(":-") => {
                             let field = Value::Symbol(x[2..].to_string().into_boxed_str());
                             let mut rest_ = vec![field];

@@ -332,6 +332,19 @@ impl Gc<Table> {
         *found = false;
         Value::Null
     }
+
+    pub fn copy(&mut self, vm: &mut VM, mut from: Gc<Table>) {
+        gc_frame!(vm.gc().roots() => from: Gc<Table>);
+
+        for i in 0..from.cells.len() {
+            let mut node = from.cells[i];
+            gc_frame!(vm.gc().roots() => node: Nullable<Cell>);
+            while node.is_not_null() {
+                self.insert(vm, &node.key, &(**node).value);
+                *node = node.next;
+            }
+        }
+    }
 }
 
 pub fn value_eq(vm: &mut VM, a: &Value, b: &Value) -> Value {
@@ -543,6 +556,16 @@ pub struct Obj {
 }
 
 impl Obj {
+    pub fn with_proto(vm: &mut VM, mut proto: Gc<Obj>) -> Gc<Obj> {
+        let mut this = Nullable::NULL;
+        gc_frame!(vm.gc().roots() => proto: Gc<Obj>,this: Nullable<Obj>);
+        *this = Obj::with_capacity(vm, proto.table.count).nullable();
+
+        this.proto = Some(proto.get());
+        this.table.copy(vm, proto.table);
+
+        this.as_gc()
+    }
     pub fn new(vm: &mut VM) -> Gc<Obj> {
         let table = Table::new(vm, 2);
         vm.gc().fixed(Obj { table, proto: None })

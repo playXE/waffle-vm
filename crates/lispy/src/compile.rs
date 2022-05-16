@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use super::ast::*;
@@ -10,6 +11,72 @@ pub struct Compiler<'a, 'b> {
 impl<'a, 'b> Compiler<'a, 'b> {
     pub fn compile_expr(&mut self, expr: &Expr, tail: bool) -> Result<(), Box<str>> {
         match &expr.kind {
+            ExprKind::Import(imports) => {
+                let loader = self.ctx.global(Rc::new(Global::Symbol(
+                    "loader".to_string().into_boxed_str(),
+                )));
+                let loadmodule = self.ctx.global(Rc::new(Global::Symbol(
+                    "loadmodule".to_string().into_boxed_str(),
+                )));
+                for import in imports.iter() {
+                    match import {
+                        Import::File(file) => {
+                            let file = self
+                                .ctx
+                                .global(Rc::new(Global::Str(file.clone().into_boxed_str())));
+                            self.ctx.write(Op::AccGlobal(file as _));
+                            self.ctx.write(Op::Push);
+                            self.ctx.write(Op::AccBuiltin(loader as _));
+                            self.ctx.write(Op::Push);
+                            self.ctx.write(Op::AccBuiltin(loader as _));
+                            self.ctx.write(Op::Push);
+                            self.ctx.write(Op::AccField(loadmodule as _));
+                            self.ctx.write(Op::ObjCall(2));
+                        }
+                        Import::Module(module) => {
+                            let mut path = PathBuf::new();
+                            for module in module.iter() {
+                                path.push(module);
+                            }
+                            let path = self.ctx.global(Rc::new(Global::Str(
+                                path.display().to_string().into_boxed_str(),
+                            )));
+                            self.ctx.write(Op::AccGlobal(path as _));
+                            self.ctx.write(Op::Push);
+                            self.ctx.write(Op::AccBuiltin(loader as _));
+                            self.ctx.write(Op::Push);
+                            self.ctx.write(Op::AccBuiltin(loader as _));
+                            self.ctx.write(Op::Push);
+                            self.ctx.write(Op::AccField(loadmodule as _));
+                            self.ctx.write(Op::ObjCall(2));
+                            let g = self.ctx.global(Rc::new(Global::Var(
+                                module.last().unwrap().clone().into_boxed_str(),
+                            )));
+                            self.ctx.write(Op::SetGlobal(g as _));
+                        }
+                    }
+                }
+
+                Ok(())
+            }
+            ExprKind::Export(exports) => {
+                let exports_ = self.ctx.global(Rc::new(Global::Symbol(
+                    "exports".to_string().into_boxed_str(),
+                )));
+
+                for export in exports.iter() {
+                    self.ctx.write(Op::AccBuiltin(exports_ as _));
+                    self.ctx.write(Op::Push);
+                    let field = self
+                        .ctx
+                        .global(Rc::new(Global::Symbol(export.to_string().into_boxed_str())));
+
+                    let var = self.ctx.access_var(export);
+                    self.ctx.compile_access_get(&var);
+                    self.ctx.write(Op::SetField(field as _));
+                }
+                Ok(())
+            }
             ExprKind::Begin(exprs) => {
                 for (i, expr) in exprs.iter().enumerate() {
                     self.compile_expr(expr, i == exprs.len() - 1 && tail)?;
@@ -118,8 +185,19 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     let name = self.ctx.global(Rc::new(Global::Symbol(name)));
                     self.ctx.write(Op::AccBuiltin(name as _));
                 } else {
-                    self.ctx.use_var(x);
+                    if &**x == "this" {
+                        self.ctx.write(Op::AccThis);
+                    } else {
+                        self.ctx.use_var(x);
+                    }
                 }
+                Ok(())
+            }
+
+            ExprKind::Set(var, value) => {
+                let acc = self.access(&var.kind)?;
+                self.compile_expr(value, false)?;
+                self.ctx.compile_access_set(&acc);
                 Ok(())
             }
 
@@ -149,6 +227,23 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 }
                 Ok(())
             }
+            ExprKind::MethodCall(method, object, args) => {
+                for arg in args.iter() {
+                    self.compile_expr(arg, false)?;
+                    self.ctx.write(Op::Push);
+                }
+                self.compile_expr(object, false)?;
+                self.ctx.write(Op::Push);
+                let g = self.ctx.global(Rc::new(Global::Symbol(method.clone())));
+                self.ctx.write(Op::AccField(g as _));
+                self.ctx.write(Op::ObjCall(args.len() as _));
+                Ok(())
+            }
+            ExprKind::Str(x) => {
+                let g = self.ctx.global(Rc::new(Global::Str(x.clone())));
+                self.ctx.write(Op::AccGlobal(g as _));
+                Ok(())
+            }
             ExprKind::Fn(name, _variadic, args, body) => {
                 let g = if let Some(name) = name {
                     let g = self.ctx.global(Rc::new(Global::Var(name.clone())));
@@ -163,7 +258,52 @@ impl<'a, 'b> Compiler<'a, 'b> {
 
                 Ok(())
             }
+            ExprKind::Field(object, fields) => {
+                self.compile_expr(object, false)?;
+                for i in 0..fields.len() {
+                    let field = &fields[i];
+                    let g = self.ctx.global(Rc::new(Global::Symbol(field.clone())));
+                    self.ctx.write(Op::AccField(g as _));
+                }
+
+                Ok(())
+            }
+            ExprKind::ArrayInit(x) => {
+                for x in x.iter().skip(1) {
+                    self.compile_expr(x, false)?;
+                    self.ctx.write(Op::Push);
+                }
+                if x.len() != 0 {
+                    self.compile_expr(&x[0], false)?;
+                }
+                self.ctx.write(Op::MakeArray(if x.len() == 0 {
+                    0
+                } else {
+                    (x.len() - 1) as i32
+                }));
+                Ok(())
+            }
             _ => todo!("{:?}", expr),
+        }
+    }
+
+    fn access(&mut self, expr: &ExprKind) -> Result<Access, Box<str>> {
+        match expr {
+            ExprKind::Var(name) if &**name == "this" => Ok(Access::This),
+            ExprKind::Var(name) => Ok(self.ctx.access_var(name)),
+            ExprKind::Field(object, fields) => {
+                self.compile_expr(object, false)?;
+                for i in 0..fields.len() - 1 {
+                    let field = &fields[i];
+                    let g = self.ctx.global(Rc::new(Global::Symbol(field.clone())));
+                    self.ctx.write(Op::AccField(g as _));
+                }
+                self.ctx.write(Op::Push);
+                let f = fields.last().unwrap().clone();
+                let g = self.ctx.global(Rc::new(Global::Symbol(f)));
+                Ok(Access::Field(g as _))
+            }
+            _ => Err(format!("cannot access `{:?}`", expr).into_boxed_str()),
         }
     }
 
@@ -213,6 +353,22 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.compile_expr(&args[2], false)?;
                 self.ctx.write(Op::AccArray);
             }
+            "hash" => {
+                if args.len() != 1 {
+                    return Err(format!("one argument expected to `hash`").into_boxed_str());
+                }
+
+                self.compile_expr(&args[0], false)?;
+                self.ctx.write(Op::Hash);
+            }
+            "typeof" => {
+                if args.len() != 1 {
+                    return Err(format!("one argument expected to `typeof`").into_boxed_str());
+                }
+
+                self.compile_expr(&args[0], false)?;
+                self.ctx.write(Op::TypeOf);
+            }
             _ => todo!(),
         }
         Ok(())
@@ -220,7 +376,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
     pub fn compile_binop(&mut self, name: &str, args: &[Box<Expr>]) -> Result<(), Box<str>> {
         match name {
             ">" | "<" | ">=" | "<=" | "eq?" | "neq?" => {
-                if args.len() != 0 {
+                if args.len() != 2 {
                     return Err(
                         format!("only 2 arguments are supported for `{}` operator", name)
                             .into_boxed_str(),
@@ -286,11 +442,17 @@ impl<'a, 'b> Compiler<'a, 'b> {
 pub const BUILTINS_VARS: &'static [&'static str] = &["$loader", "$exports"];
 
 pub const BUILTINS_LIST: &'static [&'static str] = &[
-    "array", "amake", "asize", "acopy", "fullGC", "minorGC", "throw",
+    "array", "amake", "asize", "acopy", "fullGC", "minorGC", "throw", "new",
 ];
 
-pub const SPECIAL_CALLS: &'static [&'static str] =
-    &["array-ref", "array-set!", "table-ref", "table-set!"];
+pub const SPECIAL_CALLS: &'static [&'static str] = &[
+    "array-ref",
+    "array-set!",
+    "table-ref",
+    "table-set!",
+    "hash",
+    "typeof",
+];
 
 pub const BINOP: &'static [&'static str] = &[
     "and", "or", "&", "^", "|", "+", "-", "/", "*", "%", ">", "<", ">=", "<=", "eq?", "neq?", ">>",

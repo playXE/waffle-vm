@@ -235,6 +235,7 @@ impl<'a> Context<'a> {
                         self.env.insert(id.to_string(), e as _);
                         e as isize
                     });
+
                     self.write(Op::AccEnv(e as _));
                 } else {
                     let p = self.stack as isize - l;
@@ -459,7 +460,7 @@ pub fn disassembly(globals: &[Rc<Global>], ops: &[Op]) -> String {
                 Op::AccEnv(x) => write!(f, "AccEnv {}", x)?,
                 Op::AccField(x) => write!(f, "AccField {:?}", globals[x as usize])?,
                 Op::AccIndex(x) => write!(f, "AccIndex {}", x)?,
-                Op::AccBuiltin(x) => write!(f, "AccBuiltin ${}", x)?,
+                Op::AccBuiltin(x) => write!(f, "AccBuiltin ${} // {:?}", x, globals[x as usize])?,
                 Op::SetStack(x) => write!(f, "SetStack {}", x)?,
                 Op::SetGlobal(x) => write!(f, "SetGlobal {}", x)?,
                 Op::SetEnv(x) => write!(f, "SetEnv {}", x)?,

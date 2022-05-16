@@ -3,13 +3,14 @@ use crate::{
     memory::{
         gcwrapper::{GCWrapper, Gc, Nullable},
         minimark::read_uint_from_env,
-        Object, Trace, Visitor,
+        Allocation, Finalize, Object, Trace, Visitor,
     },
     opcode::Op,
-    value::{Function, Module, Obj, Sym, Value, INVALID_CMP},
+    value::{value_cmp, value_hash, Function, Module, Obj, Sym, Value, INVALID_CMP},
 };
 use std::{
     hash::{Hash, Hasher},
+    marker::DiscriminantKind,
     mem::size_of,
     panic::{self, catch_unwind, resume_unwind, AssertUnwindSafe},
     ptr::null_mut,
@@ -44,10 +45,11 @@ pub enum Id {
     Exports,
     Cache,
     Path,
+    Libs,
     Last,
 }
 
-static IDS: &'static [&'static str] = &["loader", "exports", "cache", "path"];
+static IDS: &'static [&'static str] = &["loader", "exports", "cache", "path", "libs"];
 
 unsafe impl Trace for VM {
     fn trace(&mut self, vis: &mut dyn Visitor) {
@@ -347,6 +349,13 @@ impl VM {
             let result = panic::catch_unwind(AssertUnwindSafe(|| match f.get() {
                 Value::Primitive(x) => {
                     self.env = x.env;
+                    if args.len() as u32 != x.nargs && !x.varsize {
+                        self.throw_str(&format!(
+                            "argument count does not match: {} != {}",
+                            args.len(),
+                            x.nargs
+                        ));
+                    }
                     ret =
                         dispatch_func2(self, args.as_ptr() as _, x.addr, args.len() as _, x.varsize)
                 }
@@ -389,6 +398,7 @@ impl VM {
                 Err(x) => {
                     if let Some(_) = x.downcast_ref::<VMTrap>() {
                         *exc = Some(self.vthis);
+
                         self.process_trap();
                         self.vthis = old_this.get();
                         self.env = old_env.get();
@@ -453,6 +463,7 @@ impl VM {
     }
 }
 use fxhash::FxHasher64;
+use libloading_mini::Library;
 use std::mem::transmute;
 use Op::*;
 #[inline(never)]
@@ -675,7 +686,14 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                     acc.set(Value::Int($nargs as _));
                 }
                 Value::Primitive(prim) => {
+                    if $nargs as u32 != prim.nargs && !prim.varsize {
+                        vm.throw_str(&format!(
+                            "argument count does not match: {} != {}",
+                            $nargs, prim.nargs
+                        ));
+                    }
                     setup_before_call!($cur_this);
+
                     acc.set(dispatch_func(vm, sp, prim.addr, $nargs as _, prim.varsize));
                     restore_after_call!();
                     pop!($nargs);
@@ -699,12 +717,22 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
             }
         }};
     }
+
+    macro_rules! intop {
+        ($op: tt) => {{
+            match (acc.get(),sp.read()) {
+                (Value::Int(x),Value::Int(y)) => { acc.set(Value::Int(x $op y)); },
+                _ => vm.throw_str(concat!("incompatible types for '", stringify!($op), "'"))
+            }
+            sp.write(Value::Null);
+            sp = sp.add(1);
+        }}
+    }
     loop {
         unsafe {
             let op = m.get()[ip];
             let op = std::mem::transmute::<_, Op>(op);
-
-            println!("{}: {:?}", ip, op);
+            println!("{} {:?}", ip, op);
             ip += 1;
             match op {
                 AccNull => {
@@ -732,16 +760,17 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                 AccField(ix) => {
                     let mut name = m.globals[ix as usize];
                     let object = acc.get();
+
                     match object {
                         Value::Object(mut object) => {
                             gc_frame!(vm.gc().roots() => object: Gc<Obj>,name: Value);
                             let tmp = object.field(vm, &name);
-                            acc.set(tmp);
+
+                            *acc = tmp;
                         }
 
                         _ => vm.throw_str("invalid field access"),
                     }
-                    acc.set(m.globals[ix as usize]);
                 }
                 AccArray => match (acc.get(), &mut *sp) {
                     (Value::Int(x), Value::Array(arr)) => {
@@ -1149,9 +1178,49 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                 Gte => test!(>=),
                 Lt => test!(<),
                 Lte => test!(<=),
-                Leave | Last => break,
+                Compare => {
+                    save!();
+                    let c = value_cmp(vm, &*sp, &*acc);
+                    restore!();
+                    acc.set(if matches!(c, Value::Int(INVALID_CMP)) {
+                        Value::Null
+                    } else {
+                        c
+                    });
+                }
+                IsNull => {
+                    acc.set(Value::Bool(matches!(acc.get(), Value::Null)));
+                }
+                IsNotNull => {
+                    acc.set(Value::Bool(!matches!(acc.get(), Value::Null)));
+                }
+                Or => intop!(|),
+                And => intop!(&),
+                Xor => intop!(^),
+                TypeOf => {
+                    let tag = std::mem::discriminant(&acc.get());
 
-                _ => todo!("{:?}", op),
+                    let tag =
+                        std::mem::transmute::<_, <Value as DiscriminantKind>::Discriminant>(tag);
+                    acc.set(WAFFLE_TYPEOF[tag as usize]);
+                }
+                New => {
+                    save!();
+                    acc.set(match acc.get() {
+                        Value::Object(x) => Value::Object(Obj::with_proto(vm, x)),
+                        _ => Value::Object(Obj::new(vm)),
+                    });
+                }
+                Hash => {
+                    save!();
+                    let hash = value_hash(vm, &*acc);
+                    acc.set(hash);
+                }
+                Apply(_) => todo!(),
+                JumpTable(_) => todo!(),
+
+                Leave | Last => break,
+                x => todo!("{:?}", x),
             }
         }
     }
@@ -1196,3 +1265,36 @@ fn callback_return(vm: &mut VM) -> (Gc<Function>, Gc<Module>) {
         (func.assume_init(), module)
     }
 }
+
+pub struct LibList {
+    pub v: Vec<Lib>,
+}
+
+pub struct Lib {
+    pub handle: Library,
+    pub name: String,
+}
+
+unsafe impl Finalize for LibList {}
+unsafe impl Trace for LibList {}
+unsafe impl Allocation for LibList {
+    const FINALIZE: bool = true;
+    const LIGHT_FINALIZER: bool = false;
+}
+impl Object for LibList {}
+
+pub const WAFFLE_TYPEOF: [Value; 13] = [
+    Value::Int(0),
+    Value::Int(1),
+    Value::Int(2),
+    Value::Int(3),
+    Value::Int(4),
+    Value::Int(5),
+    Value::Int(6),
+    Value::Int(7),
+    Value::Int(8),
+    Value::Int(9),
+    Value::Int(10),
+    Value::Int(11),
+    Value::Int(12),
+];

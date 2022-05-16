@@ -12,7 +12,9 @@ fxhash = "0.2"
 const-bitfield = "0.2"
 memmap2 = "0.5"
 rand = "0.8"
+clap = { version = "3.1", features = ["derive"] }
 sys-info = "0.9"
+libloading-mini = "0.1"
 libc = "0.2"
 indexmap = "1.0"
 memoffset = { version = "0.6", features = ["unstable_const"] }

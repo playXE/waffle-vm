@@ -979,7 +979,7 @@ impl MiniMark {
         (*obj).set_has_shadow(true);
         self.nursery_object_shadows
             .insert(obj as usize, shadowhdr as usize);
-        println!("allocate shadow for {:p}: {:p}", obj, shadowhdr);
+
         shadowhdr
     }
     /// Returns object identity. It is guaranteed to be the same for the same object even if invoked multiple times.

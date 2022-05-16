@@ -22,14 +22,23 @@ pub enum ExprKind {
     /// (<expr> <args>)
     Call(Box<Expr>, Box<[Box<Expr>]>),
     /// (.- method object <args>)
-    MethodCall(Box<Expr>, Box<Expr>, Box<[Box<Expr>]>),
+    MethodCall(Box<str>, Box<Expr>, Box<[Box<Expr>]>),
     Constructor(Box<Expr>, Box<[Box<Expr>]>),
     /// (begin <exprs>)
     Begin(Box<[Box<Expr>]>),
     While(Box<Expr>, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
+    ArrayInit(Box<[Box<Expr>]>),
+
+    Import(Vec<Import>),
+    Export(Vec<String>),
 }
 #[derive(Clone, PartialEq, Debug)]
 pub struct Expr {
     pub kind: ExprKind,
+}
+#[derive(Clone, PartialEq, Debug)]
+pub enum Import {
+    Module(Vec<String>),
+    File(String),
 }

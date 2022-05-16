@@ -9,6 +9,7 @@
     const_ptr_offset_from,
     const_refs_to_cell,
     try_trait_v2,
+    discriminant_kind,
     box_patterns
 )]
 #![allow(incomplete_features)]
@@ -17,6 +18,7 @@ use memory::gcwrapper::{GCWrapper, Gc};
 
 pub mod builtin;
 pub mod bytecode;
+pub mod linker;
 pub mod load;
 pub mod memory;
 pub mod opcode;

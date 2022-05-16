@@ -37,8 +37,10 @@ pub fn write_module(code: &[Op], globals: &[Rc<Global>]) -> Vec<u8> {
                     buf.write_u32::<LittleEndian>(x.len() as _)?;
                     buf.write_all(x.as_bytes())?;
                 }
-                Global::Var(_) => {
+                Global::Var(name) => {
                     buf.write_u8(5)?;
+                    buf.write_u32::<LittleEndian>(name.len() as _)?;
+                    buf.write_all(name.as_bytes())?;
                 }
             }
         }
@@ -246,7 +248,13 @@ pub fn read_module<T: AsRef<[u8]>>(buf: &T) -> (Vec<Op>, Vec<Rc<Global>>) {
                     )));
                 }
                 5 => {
-                    globals.push(Rc::new(Global::Var("<var>".to_string().into_boxed_str())));
+                    let len = buf.read_u32::<LittleEndian>()? as usize;
+                    let mut bytes = vec![0u8; len];
+                    buf.read_exact(&mut bytes)?;
+
+                    globals.push(Rc::new(Global::Var(
+                        String::from_utf8(bytes).unwrap().into_boxed_str(),
+                    )));
                 }
                 _ => todo!(),
             }
