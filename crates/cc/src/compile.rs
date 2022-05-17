@@ -232,6 +232,7 @@ impl Compiler<'_, '_> {
                     cjmp(self.ctx);
                 }
             }
+            Expr::Parenthesis(expr) => self.expr(expr, tail),
 
             _ => todo!(),
         }

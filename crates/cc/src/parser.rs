@@ -208,6 +208,15 @@ impl Parser<'_> {
             }
             TokenKind::Let => self.parse_let(),
             TokenKind::Function => self.parse_function(),
+            TokenKind::ParenOpen => {
+                let t = self.next()?;
+                let e = self.expr()?;
+                self.consume(TokenKind::ParenClose)?;
+                Ok(spanned!(
+                    t.span.start..e.span.end,
+                    Expr::Parenthesis(Box::new(e))
+                ))
+            }
             _ => {
                 if let Some(e) = self.expr_short()? {
                     Ok(e)

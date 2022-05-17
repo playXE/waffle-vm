@@ -324,6 +324,7 @@ pub enum Expr {
     Label(String),
     #[display(fmt = "switch")]
     Switch(Box<Spanned<Expr>>, Vec<(Spanned<Pattern>, Option<Spanned<Expr>>, Spanned<Expr>)>, Option<Box<Spanned<Expr>>>),
+   
 }
 
 
@@ -429,7 +430,7 @@ impl<T> TokenData<T> {
 pub fn can_swap(op: &TokenKind, op1: &TokenKind) -> bool {
     let p1 = priority(op);
     let p2 = priority(op1);
-    p1 < p2
+    p1 <= p2
 }
 
 pub fn priority(op: &TokenKind) -> i32 {
@@ -440,9 +441,10 @@ pub fn priority(op: &TokenKind) -> i32 {
         Band | Or => -2,
         Eq | Neq | Greater | GreaterEq | LessEq | Less => -1,
         Plus | Minus => 0,
-        Star | Slash => 1,
+        Slash => 1,
         BitAnd | BitOr | Xor => 2,
         Shr | Shl | Percent | UShr => 3,
+        Star => 1,
         _ => 4,
     }
 }
@@ -603,7 +605,7 @@ where
 
 pub fn is_unop(x: TokenKind) -> bool {
     match x {
-        TokenKind::Not | TokenKind::Minus | TokenKind::BitAnd=> true,
+        TokenKind::Not | TokenKind::Minus | TokenKind::BitAnd | TokenKind::Star => true,
         _ => false
     }
 }
