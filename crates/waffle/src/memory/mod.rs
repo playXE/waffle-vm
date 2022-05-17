@@ -118,7 +118,7 @@ quasiconst! {
             },
         is_varsize: T::VARSIZE,
         trace: trace_erased::<T>,
-        finalize:if T::VARSIZE { Some(finalize_erased::<T>) } else { None },
+        finalize:if T::FINALIZE { Some(finalize_erased::<T>) } else { None },
         light_finalizer: T::LIGHT_FINALIZER,
         type_id: TypeId::of::<T>(),
         type_name: std::any::type_name::<T>()
