@@ -1,7 +1,7 @@
-use std::iter::Peekable;
+use std::{iter::Peekable, ops::Range};
 
 use super::ast::*;
-use ariadne::{sources, Label, Report, ReportKind};
+use ariadne::{Label, Report, ReportBuilder, ReportKind};
 #[derive(Debug, Clone, PartialEq)]
 pub enum SyntaxError {
     UnexpectedToken { expected: String, got: Token },
@@ -10,13 +10,19 @@ pub enum SyntaxError {
     UnexpectedPattern(Spanned<Pattern>, String),
     UnexpectedEof(Token),
     InvalidAssignment(SpanExpr),
+    EmptyImport(Span),
 }
 
 pub type ParseResult<T> = Result<T, SyntaxError>;
 
 impl SyntaxError {
-    pub fn report(&self, filename: String, file: &str) {
+    pub fn report(&self, filename: String, file: &str) -> ReportBuilder<(String, Range<usize>)> {
         match self {
+            SyntaxError::EmptyImport(span) => {
+                Report::build(ReportKind::Error, &filename, span.start)
+                    .with_message("empty import")
+                    .with_label(Label::new((filename.clone(), (*span).into())))
+            }
             SyntaxError::UnexpectedToken { expected, got } => {
                 Report::build(ReportKind::Error, &filename, got.span.start)
                     .with_message("Unexpected token")
@@ -66,9 +72,6 @@ impl SyntaxError {
                     )
             }
         }
-        .finish()
-        .eprint(sources(vec![(filename, file)]))
-        .unwrap()
     }
 }
 macro_rules! spanned {
@@ -280,6 +283,53 @@ impl Parser<'_> {
                     Expr::Parenthesis(Box::new(e))
                 ))
             }
+            TokenKind::Import => {
+                let t = self.next()?;
+                if let TokenKind::Str = self.peek() {
+                    let str = self.next()?;
+                    let path = self.text(str);
+                    Ok(spanned!(
+                        t.span.start..str.span.end,
+                        Expr::ImportStr(path.to_string())
+                    ))
+                } else {
+                    let modules =
+                        self.parse_list(TokenKind::Dot, TokenKind::Semicolon, Self::ident)?;
+                    if modules.is_empty() {
+                        return Err(SyntaxError::EmptyImport(t.span));
+                    }
+                    let span = modules.last().unwrap().span;
+                    Ok(spanned!(
+                        t.span.start..span.end,
+                        Expr::Import(modules.iter().map(|x| x.node.clone()).collect())
+                    ))
+                }
+            }
+            TokenKind::Export => {
+                let t = self.next()?;
+                self.consume(TokenKind::BraceOpen)?;
+                let exports = self.parse_list(TokenKind::Comma, TokenKind::BraceClose, |p| {
+                    let id = p.ident()?;
+                    if let TokenKind::Ident = p.peek() {
+                        let x = p.next()?;
+                        let t = p.text(x);
+                        if t == "as" {
+                            let next = p.ident()?;
+
+                            Ok(Export::Alias(id.node, next.node))
+                        } else {
+                            Err(SyntaxError::UnexpectedToken {
+                                expected: "comma or 'as'".to_string(),
+                                got: x,
+                            })
+                        }
+                    } else {
+                        Ok(Export::Identifier(id.node))
+                    }
+                })?;
+
+                Ok(spanned!(t.span, Expr::Export(exports)))
+            }
             _ => {
                 if let Some(e) = self.expr_short()? {
                     Ok(e)
@@ -389,7 +439,7 @@ impl Parser<'_> {
                 }
                 _ => {
                     return Err(SyntaxError::UnexpectedToken {
-                        expected: format!("variable or function definition expected"),
+                        expected: format!("variable or function definition"),
                         got: self.next()?,
                     })
                 }

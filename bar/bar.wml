@@ -1,0 +1,3 @@
+let myVar = 42; 
+
+export { myVar as Var }

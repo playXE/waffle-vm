@@ -36,10 +36,11 @@ pub struct Extras {
     pos: Position,
 }
 
-#[derive(Debug, Clone, PartialEq, Logos, Hash, Eq, Copy,Display )]
+#[derive(Debug, Clone, PartialEq, Logos, Hash, Eq, Copy, Display)]
 #[logos(extras = Extras)]
 pub enum TokenKind {
     #[token("(")]
+    #[display(fmt="(")]
     ParenOpen,
     #[regex(r"[ \t\f]", |lex| {
         lex.extras.pos.column += lex.slice().len();
@@ -55,135 +56,188 @@ pub enum TokenKind {
     #[error]
     Error,
     #[token(";")]
+    #[display(fmt=";")]
     Semicolon,
+    #[display(fmt=".")]
     #[token(".")]
     Dot,
+    #[display(fmt=",")]
     #[token(",")]
     Comma,
+    #[display(fmt="->")]
     #[token("->")]
     Arrow,
+    #[display(fmt="{{")]
     #[token("{")]
     BraceOpen,
+    #[display(fmt="}}")]
     #[token("}")]
     BraceClose,
-    
+
+    #[display(fmt=")")]
     #[token(")")]
     ParenClose,
+    #[display(fmt="[")]
     #[token("[")]
     BracketOpen,
+    #[display(fmt="]")]
     #[token("]")]
     BracketClose,
+    #[display(fmt="true")]
     #[token("true")]
     True,
+    #[display(fmt="false")]
     #[token("false")]
     False,
+    #[display(fmt="null")]
     #[token("null")]
     Null,
+    #[display(fmt="this")]
     #[token("this")]
     This,
+    #[display(fmt="integer literal")]
     #[regex(r"\d+", |lex| {
         lex.extras.pos.column += lex.slice().len();
-        
-
-        
     })]
+    
     Int,
+    #[display(fmt="float literal")]
     #[regex(r"\d+\.\d+", |lex| {
         lex.extras.pos.column += lex.slice().len();
       
     })]
     Float,
+
+    #[display(fmt="string literal")]
     #[regex(r#""[^"]*""#, |lex| {
-        lex.extras.pos.column += lex.slice().len();
-      
-        
+        lex.extras.pos.column += lex.slice().len();  
     })]
-    Str,
+    
+    Str,#[display(fmt="builtin")]
     #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*", |lex| {
         lex.extras.pos.column += lex.slice().len();
     })]
     Builtin,
+    #[display(fmt="identifier")]
     // identifiers
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| {
         lex.extras.pos.column += lex.slice().len();
     })]
     Ident,
+    #[display(fmt="var")]
     #[token("var")]
     Var,
+    #[display(fmt="while")]
     #[token("while")]
     While,
+    #[display(fmt="do")]
     #[token("do")]
     Do,
+    #[display(fmt="if")]
     #[token("if")]
     If,
+    #[display(fmt="else")]
     #[token("else")]
     Else,
+    #[display(fmt="fun")]
     #[token("fun")]
     Function,
+    #[display(fmt="return")]
     #[token("return")]
     Return,
+    #[display(fmt="break")]
     #[token("break")]
     Break,
+    #[display(fmt="continue")]
     #[token("continue")]
     Continue,
+    #[display(fmt="default")]
     #[token("default")]
     Default,
+    #[display(fmt="try")]
     #[token("try")]
     Try,
    
+    #[display(fmt="in")]
     #[token("in")]
     In,
+    #[display(fmt="let")]
     #[token("let")]
     Let,
+    #[display(fmt="catch")]
     #[token("catch")]
     Catch,
+    #[display(fmt="switch")]
     #[token("switch")]
     Switch,
+    #[display(fmt="then")]
     #[token("then")]
     Then,
+    #[display(fmt="rec")]
     #[token("rec")]
     Rec,
+    #[display(fmt="+")]
     #[token("+")]
     Plus,
+    #[display(fmt="-")]
     #[token("-")]
     Minus,
+    #[display(fmt="*")]
     #[token("*")]
     Star,
+    #[display(fmt="/")]
     #[token("/")]
     Slash,
+    #[display(fmt="%")]
     #[token("%")]
     Percent,
 
+    #[display(fmt=">")]
     #[token(">")]
     Greater,
+    #[display(fmt=">=")]
     #[token(">=")]
     GreaterEq,
+    #[display(fmt="<")]
     #[token("<")]
     Less,
+    #[display(fmt="<=")]
     #[token("<=")]
     LessEq,
+    #[display(fmt="==")]
     #[token("==")]
     Eq,
+    #[display(fmt="!=")]
     #[token("!=")]
     Neq,
+    #[display(fmt=">>")]
     #[token(">>")]
     Shr,
+    #[display(fmt="<<")]
     #[token("<<")]
     Shl,
+    #[display(fmt=">>>")]
     #[token(">>>")]
     UShr,
+    #[display(fmt="&")]
     #[token("&")]
     BitAnd,
+    #[display(fmt="|")]
     #[token("|")]
     BitOr,
+    #[display(fmt="^")]
     #[token("^")]
     Xor,
+    #[display(fmt="and")]
     #[token("and")]
     And,
+    #[display(fmt="||")]
     #[token("||")]
     Or,
+    #[display(fmt="<=>")]
     #[token("<=>")]
     Spaceship,
+    #[display(fmt="&&")]
     #[token("&&")]
     Band,
     
@@ -209,50 +263,18 @@ pub enum TokenKind {
     BitOrAssign,
     #[token("^=")]
     XorAssign,
+    #[display(fmt="=")]
     #[token("=")]
     Assign,
+    #[display(fmt="!")]
     #[token("!")]
     Not,
     #[token(":")]
     Colon,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Binop {
-    Add,
-    Sub,
-    Div,
-    Mul,
-    Mod,
-    Gt,
-    Ge,
-    Lt,
-    Le,
-    Eq,
-    Neq,
-    Shr,
-    Shl,
-    UShr,
-    BitAnd,
-    BitOr,
-    Xor,
-    And,
-    Or,
-    Spaceship,
-
-    AddAssign,
-    SubAssign,
-    MulAssign,
-    DivAssign,
-    RemAssign,
-    ShrAssign,
-    ShlAssign,
-    UShrAssign,
-    BitAndAssign,
-    BitOrAssign,
-    XorAssign,
-
-    Assign,
+    #[token("import")]
+    Import,
+    #[token("export")]
+    Export,
 }
 
 fn opt(x: &Option<impl ToString>) -> String {
@@ -324,9 +346,33 @@ pub enum Expr {
     Label(String),
     #[display(fmt = "switch")]
     Switch(Box<Spanned<Expr>>, Vec<(Spanned<Pattern>, Option<Spanned<Expr>>, Spanned<Expr>)>, Option<Box<Spanned<Expr>>>),
-   
+    #[display(fmt="import {}","print_import(_0)")]
+    Import(Vec<String>),
+    ImportStr(String),
+    #[display(fmt="export [{}]","join(_0)")]
+    Export(Vec<Export>)
 }
 
+#[derive(Debug, Display, Clone,PartialEq)]
+pub enum Export {
+    /// export { <identifier> as <identifier> }
+    #[display(fmt="{} as {}",_0,_1)]
+    Alias(String,String),
+    /// export { <identifier> }
+    #[display(fmt = "{}",_0)]
+    Identifier(String),
+}
+
+fn print_import(x: &[String]) -> String {
+    let mut f = String::new();
+    for (i,x) in x.iter().enumerate() {
+        f.push_str(x);
+        if i != x.len() - 1 {
+            f.push('.');
+        }
+    }
+    f
+}
 
 fn print_let(defs: &[Spanned<LetDef>],rec: bool,body: &Option<Box<Spanned<Expr>>>) -> String {
     let mut f = String::new();

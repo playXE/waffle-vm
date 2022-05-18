@@ -288,12 +288,14 @@ fn get_loader_path(vm: &mut VM) -> Value {
     let path = match std::env::var("WAFFLEPATH") {
         Ok(p) => p,
         Err(_) => format!(
-            "{},/usr/local/lib/waffle,/usr/lib/waffle,/usr/local/bin,/usr/bin",
+            "{}:/usr/local/lib/waffle:/usr/lib/waffle:/usr/local/bin:/usr/bin:",
             MODULE_PATH
         ),
     };
 
-    let paths = path.split(",").collect::<Vec<_>>();
+    let paths = std::env::split_paths(&path)
+        .map(|x| x.display().to_string())
+        .collect::<Vec<String>>();
 
     let mut buf = vm.gc().array(paths.len(), Value::Null);
     gc_frame!(vm.gc().roots() => buf: Gc<Array<Value>>);

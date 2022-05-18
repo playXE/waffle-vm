@@ -1,8 +1,8 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::path::PathBuf;
 
-use cc::compile::Compiler;
+use cc::compile::{compile, CompileOpts};
 use clap::Parser;
-use waffle::reflect::Context;
+
 #[derive(Parser)]
 #[clap(author, version, about)]
 pub struct Opt {
@@ -11,34 +11,27 @@ pub struct Opt {
 }
 
 fn main() -> Result<(), std::io::Error> {
-    let opt = Opt::parse();
-
-    let file = std::fs::read_to_string(&opt.input)?;
-    let mut parser = cc::parser::Parser::new(&file);
-    match parser.parse_program() {
-        Ok(exprs) => {
-            let (globals, code) = Context::compile(|ctx| {
-                let mut refvars = HashSet::new();
-                let mut cc = Compiler {
-                    ctx,
-                    toplevel: true,
-                    refvars: &mut refvars,
-                };
-                for expr in exprs {
-                    println!("{}", expr);
-                    cc.expr(&expr, false);
-                }
-                Ok(())
-            })
-            .unwrap();
-            let str = waffle::reflect::disassembly(&globals, &code);
-            println!("{}", str);
-            let bc = waffle::bytecode::write_module(&code, &globals);
-            std::fs::write(&opt.output, bc)?;
+    let mut opts = CompileOpts::parse();
+    let input = opts.input.clone();
+    if let Ok(dir) = std::env::current_dir() {
+        opts.path.push(dir.display().to_string());
+    }
+    if let Ok(var) = std::env::var("WAFFLEPATH") {
+        for path in std::env::split_paths(&var) {
+            opts.path.push(path.display().to_string());
         }
-        Err(e) => {
-            e.report(opt.input.display().to_string(), &file);
-        }
+    }
+    if let Some(p) = input.parent() {
+        opts.path.push(p.display().to_string());
+    }
+    let mut src = String::new();
+    match compile(opts, &mut src) {
+        Ok(_) => (),
+        Err(e) => e
+            .report(&input.display().to_string(), &src)
+            .finish()
+            .eprint(ariadne::sources(vec![(input.display().to_string(), src)]))
+            .unwrap(),
     }
     Ok(())
 }
