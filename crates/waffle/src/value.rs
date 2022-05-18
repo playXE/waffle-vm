@@ -143,6 +143,13 @@ impl Value {
             _ => unreachable!(),
         }
     }
+
+    pub fn abstract_(self) -> Gc<dyn Object> {
+        match self {
+            Self::Abstract(x) => x,
+            _ => unreachable!(),
+        }
+    }
 }
 
 unsafe impl Trace for Value {
@@ -166,11 +173,36 @@ impl Object for Value {}
 pub struct Function {
     pub nargs: u32,
     pub varsize: bool,
-    pub env: Value,
+    pub env: Nullable<Array<Nullable<Upvalue>>>,
     pub addr: usize,
     pub module: Nullable<Module>,
 }
 
+pub struct Upvalue {
+    pub next: Nullable<Self>,
+    pub closed: bool,
+    pub state: UpvalState,
+}
+
+pub union UpvalState {
+    pub slot: *mut Value,
+    pub local: Value,
+}
+
+unsafe impl Trace for Upvalue {
+    fn trace(&mut self, visitor: &mut dyn Visitor) {
+        self.next.trace(visitor);
+        if self.closed {
+            unsafe {
+                self.state.local.trace(visitor);
+            }
+        }
+    }
+}
+
+unsafe impl Finalize for Upvalue {}
+unsafe impl Allocation for Upvalue {}
+impl Object for Upvalue {}
 unsafe impl Trace for Function {
     fn trace(&mut self, vis: &mut dyn Visitor) {
         self.env.trace(vis);

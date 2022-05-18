@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use cc::compile::Compiler;
 use clap::Parser;
@@ -18,9 +18,11 @@ fn main() -> Result<(), std::io::Error> {
     match parser.parse_program() {
         Ok(exprs) => {
             let (globals, code) = Context::compile(|ctx| {
+                let mut refvars = HashSet::new();
                 let mut cc = Compiler {
                     ctx,
                     toplevel: true,
+                    refvars: &mut refvars,
                 };
                 for expr in exprs {
                     println!("{}", expr);

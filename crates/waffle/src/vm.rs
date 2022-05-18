@@ -1,12 +1,12 @@
 use crate::{
     gc_frame,
     memory::{
-        gcwrapper::{GCWrapper, Gc, Nullable},
+        gcwrapper::{Array, GCWrapper, Gc, Nullable},
         minimark::read_uint_from_env,
         Allocation, Finalize, Object, Trace, Visitor,
     },
     opcode::Op,
-    value::{value_cmp, value_hash, Function, Module, Obj, Sym, Value, INVALID_CMP},
+    value::{value_cmp, value_hash, Function, Module, Obj, Sym, Upvalue, Value, INVALID_CMP},
 };
 use std::{
     hash::{Hash, Hasher},
@@ -22,7 +22,7 @@ pub struct VM {
     sp: *mut Value,
     csp: *mut Value,
     pub(crate) vthis: Value,
-    env: Value,
+    env: Nullable<Array<Nullable<Upvalue>>>,
 
     spmin: *mut Value,
     spmax: *mut Value,
@@ -36,6 +36,7 @@ pub struct VM {
     pub(crate) builtins: Value,
     symtab: Box<[Option<Gc<Sym>>]>,
     ids: [Option<Gc<Sym>>; Id::Last as u8 as usize],
+    open_upvalues: Nullable<Upvalue>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
@@ -82,6 +83,8 @@ unsafe impl Trace for VM {
             for id in self.ids.iter_mut() {
                 id.trace(vis);
             }
+
+            self.open_upvalues.trace(vis);
         }
     }
 }
@@ -118,7 +121,7 @@ impl VM {
         let symtab_size = read_uint_from_env("WAFFLE_SYMTAB_SIZE").unwrap_or_else(|| 128);
         let mut this = Box::leak(Box::new(VM {
             gc: GCWrapper::new(),
-            env: Value::Null,
+            env: Nullable::NULL,
             vthis: Value::Null,
             exc_stack: Value::Null,
             callback_mod: Nullable::NULL,
@@ -132,6 +135,7 @@ impl VM {
             builtins: Value::Null,
             symtab: vec![None; symtab_size].into_boxed_slice(),
             ids: [None; Id::Last as usize],
+            open_upvalues: Nullable::NULL,
         }));
 
         let stack_size = stack_size.unwrap_or_else(|| VM::STACK_SIZE);
@@ -236,7 +240,13 @@ impl VM {
                     self.csp = csp;
                     // restore state
                     self.vthis = trap.add(1).read();
-                    self.env = trap.add(2).read();
+                    self.env = match trap.add(2).read() {
+                        Value::Null => Nullable::NULL,
+                        Value::Abstract(x) => {
+                            x.downcast::<Array<Nullable<Upvalue>>>().unwrap().nullable()
+                        }
+                        _ => unreachable!(),
+                    };
 
                     ip = trap.add(3).read().int() as usize;
                     // if thrown from native code `module` is allowed to be null
@@ -273,7 +283,11 @@ impl VM {
         self.sp
             .write(Value::Int((self.csp as isize - self.spmin as isize) as _));
         self.sp.add(1).write(self.vthis);
-        self.sp.add(2).write(self.env);
+        self.sp.add(2).write(if self.env.is_not_null() {
+            Value::Abstract(self.env.as_gc().as_dyn())
+        } else {
+            Value::Null
+        });
         self.sp.add(3).write(Value::Int(0));
         self.sp.add(4).write(Value::Null);
         self.sp.add(5).write(Value::Int(self.trap as _));
@@ -429,7 +443,11 @@ impl VM {
 
         self.csp = sp;
         self.vthis = trap.add(1).read();
-        self.env = trap.add(2).read();
+        self.env = match trap.add(2).read() {
+            Value::Null => Nullable::NULL,
+            Value::Abstract(x) => x.downcast::<Array<Nullable<Upvalue>>>().unwrap().nullable(),
+            _ => unreachable!(),
+        };
 
         sp = trap.add(6);
         self.trap = trap.add(5).read().int() as _;
@@ -438,13 +456,30 @@ impl VM {
             self.sp = self.sp.add(1);
         }
     }
-
+    unsafe fn close_upvalues(&mut self, slot: *mut Value) {
+        let mut prev = Nullable::<Upvalue>::NULL;
+        let mut ls = self.open_upvalues;
+        while ls.is_not_null() {
+            if ls.state.slot == slot {
+                ls.closed = true;
+                ls.state.local = slot.read();
+                if prev.is_not_null() {
+                    prev.next = ls.next;
+                } else {
+                    self.open_upvalues = ls.next;
+                }
+            } else {
+                prev = ls;
+                ls = ls.next;
+            }
+        }
+    }
     /// Executes the given module code and returns the value stored in accumulator in the end.
     pub fn execute(&mut self, mut m: Gc<Module>) -> Result<Value, Value> {
         let mut old_env = self.env;
         let mut old_vthis = self.vthis;
         gc_frame!(self.gc().roots()=>m: Gc<Module>,old_env: Value,old_vthis: Value);
-        self.env = Value::Array(self.gc().array(0, Value::Null));
+        self.env = Nullable::NULL;
         self.vthis = Value::Null;
         let ret = match catch_unwind(AssertUnwindSafe(|| unsafe {
             self.interp(m.nullable(), Value::Null, 0)
@@ -589,7 +624,11 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
             csp.write(Value::Null);
             csp = csp.sub(1);
 
-            vm.env = csp.read();
+            vm.env = match csp.read() {
+                Value::Null => Nullable::NULL,
+                Value::Abstract(x) => x.downcast::<Array<Nullable<Upvalue>>>().unwrap().nullable(),
+                _ => unreachable!(),
+            };
             csp.write(Value::Null);
             csp = csp.sub(1);
 
@@ -607,7 +646,11 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
             csp.write(Value::Int(ip as _));
 
             csp = csp.add(1);
-            csp.write(vm.env);
+            csp.write(if vm.env.is_not_null() {
+                Value::Abstract(vm.env.as_gc().as_dyn())
+            } else {
+                Value::Null
+            });
 
             csp = csp.add(1);
             csp.write(vm.vthis);
@@ -732,7 +775,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
         unsafe {
             let op = m.get()[ip];
             let op = std::mem::transmute::<_, Op>(op);
-            println!("{} {:?}", ip, op);
+            //println!("{} {:?}", ip, op);
             ip += 1;
             match op {
                 AccNull => {
@@ -822,7 +865,12 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                 }
 
                 AccEnv(ix) => {
-                    acc.set(vm.env.array()[ix as usize]);
+                    let upval = vm.env[ix as usize];
+                    if upval.closed {
+                        acc.set(upval.state.local);
+                    } else {
+                        acc.set(upval.state.slot.read());
+                    }
                 }
                 Push => {
                     sp = sp.sub(1);
@@ -903,9 +951,16 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                 }
 
                 SetEnv(ix) => {
-                    vm.env.array()[ix as usize] = acc.get();
+                    /*vm.env.array()[ix as usize] = acc.get();
                     let arr = vm.env.array();
-                    vm.gc().write_barrier(arr);
+                    vm.gc().write_barrier(arr);*/
+                    let mut upval = vm.env[ix as usize];
+                    if upval.closed {
+                        upval.state.local = acc.get();
+                    } else {
+                        upval.state.slot.write(acc.get());
+                    }
+                    vm.gc().write_barrier(upval.as_gc());
                 }
                 SetGlobal(ix) => {
                     let mut globals = m.globals;
@@ -950,16 +1005,19 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                 }
 
                 Jump(ix) => {
-                    ip = ix as usize;
+                    ip -= 1;
+                    ip = (ip as isize + ix as isize) as usize;
                 }
                 JumpIf(ix) => {
                     if acc.get().bool() {
-                        ip = ix as usize;
+                        ip -= 1;
+                        ip = (ip as isize + ix as isize) as usize;
                     }
                 }
                 JumpIfNot(ix) => {
                     if !acc.get().bool() {
-                        ip = ix as usize;
+                        ip -= 1;
+                        ip = (ip as isize + ix as isize) as usize;
                     }
                 }
 
@@ -967,7 +1025,11 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                     sp = sp.sub(6);
                     sp.write(Value::Int(vm.csp as i64 - vm.spmin as i64));
                     sp.add(1).write(vm.vthis);
-                    sp.add(2).write(vm.env);
+                    sp.add(2).write(if vm.env.is_not_null() {
+                        Value::Abstract(vm.env.as_gc().as_dyn())
+                    } else {
+                        Value::Null
+                    });
                     sp.add(3).write(Value::Int(ix as _));
                     sp.add(4).write(if m.is_null() {
                         Value::Null
@@ -985,20 +1047,53 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                     pop!(nargs);
                     pop_infos!(true);
                 }
+                CloseUpvalue => {
+                    vm.close_upvalues(sp);
+                    pop!(1);
+                }
+                MakeEnv(n) => {
+                    let mut func = acc.get().prim_or_func();
+                    let mut upvals = func.module.globals[n as usize].array();
+                    let mut real_upvals = vm.gc().array(upvals.len(), Nullable::NULL);
+                    gc_frame!(vm.gc().roots() => func: Gc<Function>, upvals: Gc<Array<Value>>, real_upvals: Gc<Array<Nullable<Upvalue>>>);
 
-                MakeEnv(mut n) => {
-                    let mut arr = vm.gc().array(n as _, Value::Null);
-                    while n > 0 {
-                        n -= 1;
-                        arr[n as usize] = sp.read();
-                        sp.write(Value::Null);
-                        sp = sp.add(1);
+                    for i in 0..upvals.len() {
+                        let [is_local, index] = std::mem::transmute::<_, [i32; 2]>(upvals[i].int());
+                        if is_local == 0 {
+                            real_upvals[i] = vm.env[index as usize];
+                        } else {
+                            let slot = sp.add(index as usize);
+                            //    println!("upval at {}: {}", index, sp.read());
+                            let upval = {
+                                let mut upval = Nullable::NULL;
+                                let mut open = vm.open_upvalues;
+                                while open.is_not_null() {
+                                    if open.state.slot == slot {
+                                        upval = open;
+                                    }
+                                    open = open.next;
+                                }
+                                if upval.is_null() {
+                                    let tmp = vm.open_upvalues;
+                                    upval = vm
+                                        .gc()
+                                        .fixed(Upvalue {
+                                            next: tmp,
+                                            closed: false,
+                                            state: crate::value::UpvalState { slot },
+                                        })
+                                        .nullable();
+                                    vm.open_upvalues = upval;
+                                }
+                                upval
+                            };
+                            real_upvals[i] = upval;
+                        }
+                        vm.gc().write_barrier(*real_upvals);
                     }
-                    vm.gc().write_barrier(arr);
-                    let func = acc.get().prim_or_func();
                     acc.set(Value::Function(vm.gc().fixed(Function {
                         module: func.module,
-                        env: Value::Array(arr),
+                        env: real_upvals.nullable(),
                         addr: func.addr,
                         nargs: func.nargs,
                         varsize: func.varsize,
@@ -1050,7 +1145,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                         object_op!(obj, acc.as_ref(), __add);
                         pop!(1);
                     }
-                    _ => vm.throw_str("wrong operands for +"),
+                    _ => vm.throw_str(&format!("wrong operands for +: {} {}", acc.get(), *sp)),
                 },
                 Sub => match (acc.get(), &mut *sp) {
                     (Value::Int(x), Value::Int(y)) => {
@@ -1257,7 +1352,7 @@ fn callback_return(vm: &mut VM) -> (Gc<Function>, Gc<Module>) {
         func.as_mut_ptr().write(Function {
             nargs: 0,
             varsize: false,
-            env: Value::Null,
+            env: Nullable::NULL,
             addr: 0,
             module: module.nullable(),
         });

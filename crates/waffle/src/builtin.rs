@@ -12,7 +12,7 @@ pub fn make_prim(vm: &mut VM, f: usize, nargs: usize, var: bool) -> Value {
         addr: f,
         nargs: nargs as _,
         varsize: var,
-        env: Value::Null,
+        env: Nullable::NULL,
         module: Nullable::NULL,
     };
 

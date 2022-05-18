@@ -68,6 +68,11 @@ pub fn do_link(
                 funcs.push((*p, *nargs, k));
                 k
             }
+            Global::Upval(_) => {
+                let k = ctx.globals.len();
+                ctx.globals.push(g.clone());
+                k
+            }
             Global::Str(_) | Global::Float(_) | Global::Int(_) | Global::Symbol(_) => {
                 if let Some((ix, _)) = ctx.globals.iter().enumerate().find(|(_, x)| &**x == g) {
                     ix

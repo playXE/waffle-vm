@@ -42,6 +42,14 @@ pub fn write_module(code: &[Op], globals: &[Rc<Global>]) -> Vec<u8> {
                     buf.write_u32::<LittleEndian>(name.len() as _)?;
                     buf.write_all(name.as_bytes())?;
                 }
+                Global::Upval(x) => {
+                    buf.write_u8(6)?;
+                    buf.write_u16::<LittleEndian>(x.len() as _)?;
+                    for (is_local, index) in x.iter() {
+                        buf.write_u8(*is_local as u8)?;
+                        buf.write_u16::<LittleEndian>(*index as u16)?;
+                    }
+                }
             }
         }
         let start = buf.position();
@@ -190,6 +198,7 @@ pub fn write_module(code: &[Op], globals: &[Rc<Global>]) -> Vec<u8> {
                     buf.write_u8(63)?;
                     buf.write_u32::<LittleEndian>(argc as _)?;
                 }
+                Op::CloseUpvalue => buf.write_u8(64)?,
                 Op::Last => buf.write_u8(255)?,
                 _ => unreachable!(),
             }
@@ -255,6 +264,16 @@ pub fn read_module<T: AsRef<[u8]>>(buf: &T) -> (Vec<Op>, Vec<Rc<Global>>) {
                     globals.push(Rc::new(Global::Var(
                         String::from_utf8(bytes).unwrap().into_boxed_str(),
                     )));
+                }
+                6 => {
+                    let c = buf.read_u16::<LittleEndian>()? as usize;
+                    let mut upvals = vec![(false, 0); c];
+                    for i in 0..c {
+                        let is_local = buf.read_u8()?;
+                        let index = buf.read_u16::<LittleEndian>()?;
+                        upvals[i] = (is_local != 0, index);
+                    }
+                    globals.push(Rc::new(Global::Upval(upvals)))
                 }
                 _ => todo!(),
             }
@@ -409,6 +428,7 @@ pub fn read_module<T: AsRef<[u8]>>(buf: &T) -> (Vec<Op>, Vec<Rc<Global>>) {
                     let i = buf.read_i32::<LittleEndian>()?;
                     Ctor(i)
                 }
+                64 => CloseUpvalue,
                 255 => Last,
                 x => unreachable!("{}", x),
             };

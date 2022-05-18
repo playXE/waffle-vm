@@ -67,5 +67,6 @@ pub enum Op {
     Loop,
     Leave,
     Ctor(i32),
+    CloseUpvalue,
     Last,
 }

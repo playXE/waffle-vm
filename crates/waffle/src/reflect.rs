@@ -18,6 +18,7 @@ pub enum Global {
     Int(i64),
     Var(Box<str>),
     Func(isize, isize),
+    Upval(Vec<(bool, u16)>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -48,6 +49,11 @@ pub struct Globals {
     pub labels: HashMap<String, Label>,
 }
 
+pub struct Scope {
+    locals: Vec<Local>,
+    save_stack: isize,
+}
+
 pub struct Context<'a> {
     g: &'a mut Globals,
     pub ops: Vec<Op>,
@@ -62,6 +68,7 @@ pub struct Context<'a> {
     pub breaks: Vec<Box<dyn FnOnce(&mut Self)>>,
     pub continues: Vec<Box<dyn FnOnce(&mut Self)>>,
     pub pos: Vec<(isize, isize)>,
+    pub scope: &'a mut Vec<Scope>,
 }
 
 use Op::*;
@@ -71,12 +78,14 @@ pub fn stack_delta(op: Op) -> isize {
         Add | Sub | Mul | Div | Mod | Shl | Shr | UShr | Or | And | Xor | Eq | Neq | Gt | Gte
         | Lt | Lte | PhysCompare | AccArray | SetField(_) | SetIndex(_) | Compare => -1,
         SetArray => -2,
+        CloseUpvalue => -1,
         Push => 1,
         Pop(x) => -(x as isize),
         Apply(nargs) | Call(nargs) => -(nargs as isize),
         TailCall(_, nargs) => -(nargs as isize),
         ObjCall(nargs) => -(nargs as isize + 1),
-        MakeEnv(n) | MakeArray(n) => -(n as isize),
+        MakeEnv(_) => 0,
+        MakeArray(n) => -(n as isize),
         Trap(_) => 6,
         EndTrap => -6,
         _ => 0,
@@ -108,6 +117,27 @@ impl<'a> Context<'a> {
         }
     }
 
+    pub fn enter_scope(&mut self) {
+        self.scope.push(Scope {
+            locals: vec![],
+            save_stack: self.stack,
+        });
+    }
+
+    pub fn leave_scope(&mut self) {
+        let scope = self.scope.pop().unwrap();
+        for local in scope.locals.iter().rev() {
+            if local.is_captured() {
+                self.write(Op::CloseUpvalue);
+            } else {
+                self.write(Op::Pop(1));
+            }
+        }
+        if scope.save_stack < self.stack {
+            self.write(Op::Pop(self.stack as i32 - scope.save_stack as i32));
+        }
+    }
+
     pub fn process_breaks(
         &mut self,
         oldc: Vec<Box<dyn FnOnce(&mut Self)>>,
@@ -132,7 +162,7 @@ impl<'a> Context<'a> {
         let p = self.pos();
         self.write(Op::Jump(0));
         move |cx: &mut Context| {
-            cx.ops[p as usize] = Op::Jump(cx.pos() as i32);
+            cx.ops[p as usize] = Op::Jump(cx.pos() as i32 - p as i32);
         }
     }
 
@@ -140,7 +170,7 @@ impl<'a> Context<'a> {
         let p = self.pos();
         self.write(Op::Jump(0));
         move |cx: &mut Context| {
-            let jmp_pos = cx.pos() as i32;
+            let jmp_pos = cx.pos() as i32 - p as i32;
 
             cx.ops[p as usize] = if cond {
                 Op::JumpIf(jmp_pos)
@@ -172,29 +202,35 @@ impl<'a> Context<'a> {
         }
     }
 
-    pub fn access_var(&mut self, s: &str) -> Access {
-        match self.locals.get(s) {
-            Some(l) => {
-                if *l <= self.limit as isize {
-                    let e = match self.env.get(s) {
-                        Some(x) => *x,
-                        None => {
-                            let e = self.nenv;
-                            self.nenv += 1;
-                            self.env.insert(s.to_string(), e as _);
-                            e as _
+    fn lookup_scope(&mut self, name: &str) -> Option<Access> {
+        for i in 0..self.scope.len() {
+            for j in 0..self.scope[i].locals.len() {
+                if self.scope[i].locals[j].name == name {
+                    if self.scope[i].locals[j].offset <= self.limit {
+                        match self.env.get(name).copied() {
+                            Some(x) => return Some(Access::Env(x)),
+                            None => {
+                                let e = self.nenv;
+                                self.nenv += 1;
+                                self.env.insert(name.to_string(), e as _);
+                                self.scope[i].locals[j].capture();
+                                return Some(Access::Env(e as _));
+                            }
                         }
-                    };
-                    Access::Env(e)
-                } else {
-                    Access::Stack(*l as _)
+                    } else {
+                        return Some(Access::Stack(self.scope[i].locals[j].offset));
+                    }
                 }
             }
-            None => {
-                let g = self.global(Rc::new(Global::Var(s.to_string().into_boxed_str())));
-                Access::Global(g)
-            }
         }
+        None
+    }
+
+    pub fn access_var(&mut self, s: &str) -> Access {
+        self.lookup_scope(s).unwrap_or_else(|| {
+            let g = self.global(Rc::new(Global::Var(s.to_string().into_boxed_str())));
+            Access::Global(g)
+        })
     }
 
     pub fn compile_access_get(&mut self, a: &Access) {
@@ -226,7 +262,7 @@ impl<'a> Context<'a> {
     }
 
     pub fn use_var(&mut self, id: &str) {
-        match self.locals.get(id).copied() {
+        /*match self.locals.get(id).copied() {
             Some(l) => {
                 if l <= self.limit as isize {
                     let e = self.env.get(id).copied().unwrap_or_else(|| {
@@ -246,7 +282,9 @@ impl<'a> Context<'a> {
                 let g = self.global(Rc::new(Global::Var(id.to_string().into_boxed_str())));
                 self.write(Op::AccGlobal(g as _));
             }
-        }
+        }*/
+        let acc = self.access_var(id);
+        self.compile_access_get(&acc)
     }
 
     pub fn add_var(&mut self, id: &str, has_val: bool) {
@@ -255,7 +293,12 @@ impl<'a> Context<'a> {
         }
 
         self.write(Op::Push);
-        self.locals.insert(id.to_string(), self.stack as _);
+        self.scope
+            .last_mut()
+            .unwrap()
+            .locals
+            .push(Local::new(id, self.stack));
+        //self.locals.insert(id.to_string(), self.stack as _);
     }
 
     pub fn check_stack(&mut self, stack: isize) -> Result<(), String> {
@@ -285,15 +328,24 @@ impl<'a> Context<'a> {
             stack: self.stack,
             locals: &mut locals,
             loop_limit: self.loop_limit,
+            scope: self.scope,
         };
+        ctx.enter_scope();
 
         for p in params {
             ctx.stack += 1;
-            ctx.locals.insert(p.clone().to_string(), ctx.stack as _);
+
+            ctx.scope
+                .last_mut()
+                .unwrap()
+                .locals
+                .push(Local::new(p, ctx.stack));
+            //ctx.locals.insert(p.clone().to_string(), ctx.stack as _);
         }
         let s = ctx.stack;
         let ret = cb(&mut ctx)?;
         ctx.check_stack(s as _)?;
+        ctx.leave_scope();
         ctx.write(Op::Ret(ctx.stack as i32 - ctx.limit as i32));
         let gid = ctx.g.gtable.len();
         ctx.g.functions.push((
@@ -306,19 +358,28 @@ impl<'a> Context<'a> {
 
         if ctx.nenv > 0 {
             let mut a = vec![String::new(); ctx.nenv as usize];
-            let nenv = ctx.nenv;
+
             for (v, i) in ctx.env.iter() {
                 a[*i as usize] = v.clone();
             }
-
             drop(ctx);
+            let mut upvals = vec![];
             for id in a {
+                let acc = self.access_var(&id);
+                match acc {
+                    Access::Env(x) => upvals.push((false, x as u16)),
+                    Access::Stack(x) => upvals.push((true, (self.stack as i32 - x as i32) as u16)),
+                    _ => unreachable!(),
+                }
+            }
+            /*for id in a {
                 self.use_var(&id);
                 self.write(Op::Push);
-            }
+            }*/
 
+            let upvals = self.global(Rc::new(Global::Upval(upvals)));
             self.write(Op::AccGlobal(gid as _));
-            self.write(Op::MakeEnv(nenv as _));
+            self.write(Op::MakeEnv(upvals as _));
         } else {
             drop(ctx);
             self.write(Op::AccGlobal(gid as _));
@@ -395,6 +456,7 @@ impl<'a> Context<'a> {
     ) -> Result<(Vec<Rc<Global>>, Vec<Op>), String> {
         let g = Box::leak(Box::new(Globals::default())) as *mut Globals;
         let locals = Box::leak(Box::new(HashMap::new())) as *mut _;
+        let scope = Box::leak(Box::new(Vec::new())) as *mut Vec<Scope>;
         let mut _ops = {
             let mut ctx = Self {
                 g: unsafe { &mut *g },
@@ -410,8 +472,11 @@ impl<'a> Context<'a> {
                 nenv: 0,
                 traps: vec![],
                 pos: vec![],
+                scope: unsafe { &mut *scope },
             };
+            ctx.enter_scope();
             cb(&mut ctx)?;
+            ctx.leave_scope();
             if !ctx.g.functions.is_empty() || !ctx.g.gobjects.is_empty() {
                 let ctxops = replace(&mut ctx.ops, vec![]);
 
@@ -432,7 +497,7 @@ impl<'a> Context<'a> {
 
         let g = unsafe { Box::from_raw(g) };
         let _locals = unsafe { Box::from_raw(locals) };
-
+        let _ = unsafe { Box::from_raw(scope) };
         Ok((g.gtable, _ops))
     }
 }
@@ -524,7 +589,7 @@ pub fn make_module(vm: &mut VM, globals: &[Rc<Global>], ops: &[Op]) -> Gc<Module
                         varsize: false,
                         addr: *addr as _,
                         module: m.get().nullable(),
-                        env: Value::Null,
+                        env: Nullable::NULL,
                     });
 
                     m.globals[i] = Value::Function(func);
@@ -535,5 +600,61 @@ pub fn make_module(vm: &mut VM, globals: &[Rc<Global>], ops: &[Op]) -> Gc<Module
             }
         }
         m.get()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Local {
+    name: String,
+    offset: isize,
+    is_captured: bool,
+}
+
+impl Local {
+    /// Crate a new local binding definition.
+    pub fn new(name: &str, offset: isize) -> Local {
+        Local {
+            name: name.into(),
+            offset,
+            is_captured: false,
+        }
+    }
+    pub fn offset(&self) -> isize {
+        self.offset
+    }
+    /// The local binding's name, as a `&str`.
+    pub fn as_str(&self) -> &str {
+        &self.name
+    }
+
+    /// Is this captured by some later closure?
+    pub fn is_captured(&self) -> bool {
+        self.is_captured
+    }
+
+    pub fn capture(&mut self) {
+        self.is_captured = true;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Capture {
+    index: usize,
+    is_local: bool,
+}
+
+impl Capture {
+    pub fn new(index: usize, is_local: bool) -> Capture {
+        Capture { index, is_local }
+    }
+
+    /// Get the capture's index.
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Get the capture's is local.
+    pub fn is_local(&self) -> bool {
+        self.is_local
     }
 }

@@ -473,6 +473,14 @@ pub fn is_lit(t: TokenKind) -> bool {
     }
 }
 
+pub fn can_assign(e: &Expr) -> bool {
+    use Expr::*;
+    match e {
+        Ident(_) | Field(_,_) | This | Array(_,_) => true,
+        _ => false
+    }
+}
+
 pub fn make_binop(op: TokenKind, e: Spanned<Expr>, e2: Spanned<Expr>) -> Spanned<Expr> {
     match e2.node {
         Expr::Binop(_op, _e, _e2) if can_swap(&_op, &op) => {
@@ -615,5 +623,5 @@ pub enum LetDef {
     #[display(fmt="function")]
     Function(String,Vec<String>,Box<Spanned<Expr>>),
     #[display(fmt = "variable")]
-    Variable(String,Box<Spanned<Expr>>),
+    Variable(Spanned<Pattern>,Box<Spanned<Expr>>),
 }

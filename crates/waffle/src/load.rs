@@ -44,7 +44,7 @@ pub fn read_module(vm: &mut VM, ops: &[Op], globals: &[Rc<Global>], loader: Valu
                             *nargs as u32
                         },
                         varsize: *nargs < 0,
-                        env: Value::Null,
+                        env: Nullable::NULL,
                         module: module.nullable(),
                         addr: *pos as usize,
                     });
@@ -55,6 +55,15 @@ pub fn read_module(vm: &mut VM, ops: &[Op], globals: &[Rc<Global>], loader: Valu
                 Global::Str(x) => Value::Str(vm.gc().str(x)),
                 Global::Symbol(x) => Value::Symbol(vm.intern(x)),
                 Global::Var(_) => Value::Null,
+                Global::Upval(upvals) => {
+                    let mut arr = vm.gc().array(upvals.len(), Value::Null);
+                    for i in 0..upvals.len() {
+                        let (local, ix) = upvals[i];
+                        let int = std::mem::transmute::<_, i64>([local as i32, ix as i32]);
+                        arr[i] = Value::Int(int);
+                    }
+                    Value::Array(arr)
+                }
             };
             module.globals[pos] = val;
         }
@@ -266,7 +275,7 @@ pub extern "C" fn loader_loadprim(vm: &mut VM, prim: &Value, nargs: &Value) -> V
     let f = vm.gc().fixed(Function {
         nargs,
         varsize,
-        env: Value::Null,
+        env: Nullable::NULL,
         module: Nullable::NULL,
         addr: ptr,
     });

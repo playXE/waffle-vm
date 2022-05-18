@@ -1,6 +1,9 @@
-let rec factorial n = 
-    if n <= 1 then 
-        1
+let one n = n + 1
+and add x y = let f n = x(y n) in f;
+let rec times n x = if n == 1 then
+        x 
     else 
-        n * factorial (n - 1);
-print (factorial 5)
+        add x times(n-1,x)
+and fact n = if n <= 1 then one else times n fact(n-1); 
+
+$throw fact (5)(0)  
