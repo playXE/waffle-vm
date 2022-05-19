@@ -13,12 +13,14 @@ fn path() -> Vec<String> {
     let path = match std::env::var("WAFFLEPATH") {
         Ok(p) => p,
         Err(_) => format!(
-            "{},/usr/local/lib/waffle,/usr/lib/waffle,/usr/local/bin,/usr/bin",
+            "{}:/usr/local/lib/waffle:/usr/lib/waffle:/usr/local/bin:/usr/bin:",
             MODULE_PATH
         ),
     };
 
-    let paths = path.split(",").map(|x| x.to_string()).collect::<Vec<_>>();
+    let paths = std::env::split_paths(&path)
+        .map(|x| x.display().to_string())
+        .collect::<Vec<String>>();
     paths
 }
 
@@ -188,7 +190,7 @@ pub fn do_link(
     }
 
     for (op, k, p, i) in jumps {
-        let ik = opmap[(p as isize + i as isize) as usize];
+        let ik = opmap[((p as isize + i as isize) - opmap[p]) as usize];
 
         ctx.opcodes[k] = op(ik as i32);
     }

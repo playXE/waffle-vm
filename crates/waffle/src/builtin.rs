@@ -1,7 +1,7 @@
 use crate::{
     gc_frame,
-    memory::gcwrapper::{Gc, Nullable},
-    value::{Function, Obj, Value},
+    memory::gcwrapper::{Array, Gc, Nullable},
+    value::{Cell, Function, Obj, Value},
     vm::VM,
 };
 
@@ -102,6 +102,48 @@ pub extern "C" fn builtin_symbol(vm: &mut VM, val: &Value) -> Value {
     }
 }
 
+pub extern "C" fn builtin_ofields(vm: &mut VM, obj: &Value) -> Value {
+    match obj {
+        Value::Object(ref object) => {
+            let mut arr = vm.gc().array(object.table.count, Value::Null);
+
+            gc_frame!(vm.gc().roots() => arr: Gc<Array<Value>>);
+
+            for i in 0..object.table.cells.len() {
+                let mut cell = object.table.cells[i];
+                gc_frame!(vm.gc().roots() => cell: Nullable<Cell>);
+                while cell.is_not_null() {
+                    let mut farr = vm.gc().array(2, Value::Null);
+                    farr[0] = cell.key;
+                    farr[1] = (**cell).value;
+                    arr[i] = Value::Array(farr);
+                    vm.gc().write_barrier(*arr);
+                    cell.set(cell.next);
+                }
+            }
+
+            Value::Array(*arr)
+        }
+        _ => vm.throw_str("ofields expects object"),
+    }
+}
+
+pub extern "C" fn builtin_string(vm: &mut VM, x: &Value) -> Value {
+    let x = x.to_string();
+    Value::Str(vm.gc().str(x))
+}
+
+pub extern "C" fn builtin_string_concat(vm: &mut VM, x: &Value, y: &Value) -> Value {
+    let x = x.to_string();
+    let y = y.to_string();
+    Value::Str(vm.gc().str(format!("{}{}", x, y)))
+}
+
+pub extern "C" fn builtin_print(_: &mut VM, x: &Value) -> Value {
+    println!("{}", x);
+    Value::Null
+}
+
 pub(crate) fn init_builtin(vm: &mut VM) {
     let mut obj = Obj::with_capacity(vm, 128); // we do not want to relocate this table, less garbage to cleanup
 
@@ -151,5 +193,23 @@ pub(crate) fn init_builtin(vm: &mut VM) {
     gc_frame!(vm.gc().roots() => f: Value,s: Value);
     obj.insert(vm, &s, &f);
 
+    let mut f = make_prim(vm, builtin_ofields as _, 1, false);
+    let mut s = Value::Symbol(vm.intern("ofields"));
+    gc_frame!(vm.gc().roots() => f: Value,s: Value);
+    obj.insert(vm, &s, &f);
+
+    let mut f = make_prim(vm, builtin_string as _, 1, false);
+    let mut s = Value::Symbol(vm.intern("string"));
+    gc_frame!(vm.gc().roots() => f: Value,s: Value);
+    obj.insert(vm, &s, &f);
+    let mut f = make_prim(vm, builtin_string_concat as _, 2, false);
+    let mut s = Value::Symbol(vm.intern("string_concat"));
+    gc_frame!(vm.gc().roots() => f: Value,s: Value);
+    obj.insert(vm, &s, &f);
+
+    let mut f = make_prim(vm, builtin_print as _, 1, false);
+    let mut s = Value::Symbol(vm.intern("print"));
+    gc_frame!(vm.gc().roots() => f: Value,s: Value);
+    obj.insert(vm, &s, &f);
     vm.builtins = Value::Object(obj.get());
 }

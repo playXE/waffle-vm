@@ -1,2 +1,2 @@
 [workspace]
-members = ["crates/lispy", "crates/waffle", "crates/dynlib", "crates/cc"]
+members = ["crates/waffle", "crates/wafflec"]

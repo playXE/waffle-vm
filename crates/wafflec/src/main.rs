@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use cc::compile::{compile, CompileOpts};
 use clap::Parser;
+use wafflec::compile::{compile, CompileOpts};
 
 #[derive(Parser)]
 #[clap(author, version, about)]

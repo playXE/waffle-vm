@@ -10,7 +10,6 @@ use crate::{
 };
 use std::{
     hash::{Hash, Hasher},
-    marker::DiscriminantKind,
     mem::size_of,
     panic::{self, catch_unwind, resume_unwind, AssertUnwindSafe},
     ptr::null_mut,
@@ -775,7 +774,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
         unsafe {
             let op = m.get()[ip];
             let op = std::mem::transmute::<_, Op>(op);
-            //println!("{} {:?}", ip, op);
+            println!("{} {:?}", ip, op);
             ip += 1;
             match op {
                 AccNull => {
@@ -798,6 +797,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                     acc.set(sp.offset(ix as _).read());
                 }
                 AccGlobal(ix) => {
+                    println!("{:p} {} {}", m.as_gc(), ix, 0);
                     acc.set(m.globals[ix as usize]);
                 }
                 AccField(ix) => {
@@ -986,6 +986,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
 
                     while stack > 0 {
                         stack -= 1;
+                        vm.close_upvalues(sp);
                         sp.write(Value::Null);
                         sp = sp.add(1);
                     }
@@ -1044,6 +1045,9 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                     pop!(6);
                 }
                 Ret(nargs) => {
+                    for i in 0..nargs {
+                        vm.close_upvalues(sp.add(i as _));
+                    }
                     pop!(nargs);
                     pop_infos!(true);
                 }
@@ -1293,10 +1297,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                 And => intop!(&),
                 Xor => intop!(^),
                 TypeOf => {
-                    let tag = std::mem::discriminant(&acc.get());
-
-                    let tag =
-                        std::mem::transmute::<_, <Value as DiscriminantKind>::Discriminant>(tag);
+                    let tag = acc.tag();
                     acc.set(WAFFLE_TYPEOF[tag as usize]);
                 }
                 New => {

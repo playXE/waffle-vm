@@ -322,60 +322,8 @@ impl Compiler<'_, '_> {
                     .global(Rc::new(Global::Symbol(field.clone().into_boxed_str())));
                 self.ctx.write(Op::AccField(g as _));
             }
-            Expr::Apply(callee, args) => {
-                for arg in args.iter() {
-                    self.expr(arg, false)?;
-                    self.ctx.write(Op::Push);
-                }
-                match callee.node {
-                    Expr::Field(ref object, ref method) => {
-                        self.expr(&object, false)?;
-                        self.ctx.write(Op::Push);
-                        let g = self
-                            .ctx
-                            .global(Rc::new(Global::Symbol(method.clone().into_boxed_str())));
-                        self.ctx.write(Op::AccField(g as _));
-                        self.ctx.write(Op::ObjCall(args.len() as _));
-                        return Ok(());
-                    }
-                    _ => self.expr(callee, false)?,
-                }
-                if tail {
-                    self.ctx.write(Op::TailCall(
-                        self.ctx.stack as i16 - self.ctx.limit as i16,
-                        args.len() as _,
-                    ))
-                } else {
-                    self.ctx.write(Op::Call(args.len() as _))
-                }
-            }
-            Expr::Call(callee, args) => {
-                for arg in args.iter() {
-                    self.expr(arg, false)?;
-                    self.ctx.write(Op::Push);
-                }
-                match callee.node {
-                    Expr::Field(ref object, ref method) => {
-                        self.expr(&object, false)?;
-                        self.ctx.write(Op::Push);
-                        let g = self
-                            .ctx
-                            .global(Rc::new(Global::Symbol(method.clone().into_boxed_str())));
-                        self.ctx.write(Op::AccField(g as _));
-                        self.ctx.write(Op::ObjCall(args.len() as _));
-                        return Ok(());
-                    }
-                    _ => self.expr(callee, false)?,
-                }
-                if tail {
-                    self.ctx.write(Op::TailCall(
-                        self.ctx.stack as i16 - self.ctx.limit as i16,
-                        args.len() as _,
-                    ))
-                } else {
-                    self.ctx.write(Op::Call(args.len() as _))
-                }
-            }
+            Expr::Apply(callee, args) => self.call(callee, args, tail)?,
+            Expr::Call(callee, args) => self.call(callee, args, tail)?,
             Expr::Return(expr) => {
                 match expr {
                     Some(x) => self.expr(x, true)?,
@@ -538,9 +486,82 @@ impl Compiler<'_, '_> {
                     body,
                 )?;
             }
+            Expr::Array(arr, ix) => {
+                self.expr(arr, false)?;
+                self.ctx.write(Op::Push);
+                self.expr(ix, false)?;
+                self.ctx.write(Op::AccArray);
+            }
+            Expr::While(cond, body, _dowhile) => {
+                let start = self.ctx.pos();
+
+                self.expr(cond, false)?;
+                let jend = self.ctx.cjmp(false);
+
+                self.expr(body, false)?;
+                self.ctx.goto(start as _);
+                jend(self.ctx);
+            }
             _ => todo!(),
         }
 
+        Ok(())
+    }
+
+    pub fn call(
+        &mut self,
+        callee: &SpanExpr,
+        args: &Vec<SpanExpr>,
+        tail: bool,
+    ) -> CompileResult<()> {
+        if let Expr::Builtin(ref x) = callee.node {
+            match &**x {
+                "$typeof" => {
+                    if args.len() != 0 {
+                        self.expr(&args[0], false)?;
+                    } else {
+                        self.ctx.write(Op::AccNull);
+                    }
+                    self.ctx.write(Op::TypeOf);
+                    return Ok(());
+                }
+                "$new" => {
+                    if args.len() != 0 {
+                        self.expr(&args[0], false)?;
+                    } else {
+                        self.ctx.write(Op::AccNull);
+                    }
+                    self.ctx.write(Op::New);
+                    return Ok(());
+                }
+                _ => (),
+            }
+        }
+        for arg in args.iter() {
+            self.expr(arg, false)?;
+            self.ctx.write(Op::Push);
+        }
+        match callee.node {
+            Expr::Field(ref object, ref method) => {
+                self.expr(&object, false)?;
+                self.ctx.write(Op::Push);
+                let g = self
+                    .ctx
+                    .global(Rc::new(Global::Symbol(method.clone().into_boxed_str())));
+                self.ctx.write(Op::AccField(g as _));
+                self.ctx.write(Op::ObjCall(args.len() as _));
+                return Ok(());
+            }
+            _ => self.expr(callee, false)?,
+        }
+        if tail {
+            self.ctx.write(Op::TailCall(
+                self.ctx.stack as i16 - self.ctx.limit as i16,
+                args.len() as _,
+            ))
+        } else {
+            self.ctx.write(Op::Call(args.len() as _))
+        }
         Ok(())
     }
 

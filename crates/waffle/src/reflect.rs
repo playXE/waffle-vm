@@ -126,11 +126,16 @@ impl<'a> Context<'a> {
 
     pub fn leave_scope(&mut self) {
         let scope = self.scope.pop().unwrap();
-        for local in scope.locals.iter().rev() {
-            if local.is_captured() {
-                self.write(Op::CloseUpvalue);
-            } else {
-                self.write(Op::Pop(1));
+        let there_is_captured = scope.locals.iter().any(|x| x.is_captured());
+        if !there_is_captured {
+            self.write(Op::Pop(scope.locals.len() as _));
+        } else {
+            for local in scope.locals.iter().rev() {
+                if local.is_captured() {
+                    self.write(Op::CloseUpvalue);
+                } else {
+                    self.write(Op::Pop(1));
+                }
             }
         }
         if scope.save_stack < self.stack {
@@ -331,7 +336,6 @@ impl<'a> Context<'a> {
             scope: self.scope,
         };
         ctx.enter_scope();
-
         for p in params {
             ctx.stack += 1;
 
@@ -342,6 +346,7 @@ impl<'a> Context<'a> {
                 .push(Local::new(p, ctx.stack));
             //ctx.locals.insert(p.clone().to_string(), ctx.stack as _);
         }
+
         let s = ctx.stack;
         let ret = cb(&mut ctx)?;
         ctx.check_stack(s as _)?;

@@ -64,6 +64,24 @@ impl PartialEq for Value {
 impl Eq for Value {}
 
 impl Value {
+    pub fn tag(&self) -> usize {
+        use Value::*;
+        match self {
+            Null => 0,
+            Bool(_) => 1,
+            Int(_) => 2,
+            Float(_) => 3,
+            Str(_) => 4,
+            Array(_) => 5,
+            Abstract(_) => 6,
+            Module(_) => 7,
+            Function(_) => 8,
+            Primitive(_) => 9,
+            Object(_) => 10,
+            Table(_) => 11,
+            Symbol(_) => 12,
+        }
+    }
     pub fn field(&self, vm: &mut VM, key: &Value) -> Value {
         match self {
             Self::Object(obj) => obj.field(vm, key),
@@ -248,8 +266,8 @@ impl Object for Module {}
 
 /// key-value pair
 pub struct Table {
-    count: usize,
-    cells: Gc<Array<Nullable<Cell>>>,
+    pub(crate) count: usize,
+    pub(crate) cells: Gc<Array<Nullable<Cell>>>,
 }
 
 impl Table {
@@ -396,11 +414,11 @@ unsafe impl Trace for Table {
 unsafe impl Finalize for Table {}
 impl Object for Table {}
 
-struct Cell {
-    key: Value,
-    value: Value,
-    hash: u64,
-    next: Nullable<Cell>,
+pub struct Cell {
+    pub(crate) key: Value,
+    pub(crate) value: Value,
+    pub(crate) hash: u64,
+    pub(crate) next: Nullable<Cell>,
 }
 
 unsafe impl Trace for Cell {

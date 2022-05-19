@@ -343,6 +343,35 @@ impl Parser<'_> {
             }
         }
     }
+    /// Parse string literal, including escape sequences
+    fn parse_string(token: Token, text: &str) -> ParseResult<String> {
+        let mut buf = vec![];
+        let mut backslash = false;
+        for (i, byte) in text[1..(text.len() - 1)].bytes().enumerate() {
+            if backslash {
+                match byte {
+                    b't' => buf.push(b'\t'),
+                    b'n' => buf.push(b'\n'),
+                    b @ b'"' | b @ b'\\' => buf.push(b),
+                    b => {
+                        return Err(SyntaxError::InvalidEscSeq(spanned!(
+                            (i..(i + 2)),
+                            char::from(b)
+                        )))
+                    }
+                };
+                backslash = false;
+            } else {
+                if byte == b'\\' {
+                    backslash = true;
+                } else {
+                    buf.push(byte);
+                }
+            }
+        }
+
+        String::from_utf8(buf).map_err(|_| SyntaxError::InvalidLiteral(token))
+    }
 
     pub fn ident(&mut self) -> ParseResult<Spanned<String>> {
         let tok = self.consume_next(TokenKind::Ident)?;
@@ -647,6 +676,15 @@ impl Parser<'_> {
                     Expr::Call(Box::new(e), pl)
                 ))
             }
+            TokenKind::BracketOpen => {
+                self.advance();
+                let ix = self.expr()?;
+                let t = self.consume_next(TokenKind::BracketClose)?;
+                self.expr_next(spanned!(
+                    e.span.start..t.span.end,
+                    Expr::Array(Box::new(e), Box::new(ix))
+                ))
+            }
             TokenKind::Dot => {
                 self.advance();
                 let id = self.consume_next(TokenKind::Ident)?;
@@ -773,7 +811,10 @@ impl Parser<'_> {
                         .map_err(|_| { SyntaxError::InvalidLiteral(tok) })?
                 )
             )),
-            TokenKind::Str => Ok(spanned!(tok.span, Expr::Str(self.text(tok).to_string()))),
+            TokenKind::Str => Ok(spanned!(
+                tok.span,
+                Expr::Str(Self::parse_string(tok, self.text(tok))?)
+            )),
             TokenKind::Ident => Ok(spanned!(tok.span, Expr::Ident(self.text(tok).to_string()))),
             TokenKind::Builtin => Ok(spanned!(
                 tok.span,
@@ -812,7 +853,7 @@ impl Parser<'_> {
                 self.expr_next(spanned!(tok.span, Expr::ArrayInit(ls)))
                     .map(|x| Some(x))
             }
-
+            TokenKind::Semicolon => Ok(None),
             _ => Ok(None),
         }
     }
