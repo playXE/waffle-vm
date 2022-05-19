@@ -178,7 +178,7 @@ impl Parser<'_> {
             TokenKind::BraceOpen => {
                 let t = self.next()?;
                 match self.peek() {
-                    TokenKind::Ident => {
+                    /*TokenKind::Ident => {
                         let ident = self.ident()?;
 
                         if let TokenKind::Colon = self.peek() {
@@ -217,7 +217,7 @@ impl Parser<'_> {
                                 _ => unreachable!(),
                             }
                         }
-                    }
+                    }*/
                     _ => self.parse_block(t.span),
                 }
             }
@@ -861,7 +861,9 @@ impl Parser<'_> {
     fn parse_block(&mut self, span: Span) -> ParseResult<SpanExpr> {
         let mut exprs = vec![];
         while !self.at(TokenKind::BraceClose) {
-            exprs.push(self.expr()?);
+            let e = self.expr()?;
+            println!("{}", e);
+            exprs.push(e);
 
             if self.at(TokenKind::Semicolon) {
                 self.advance();

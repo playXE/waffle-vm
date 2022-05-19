@@ -1,3 +1,6 @@
-let { length, typeOf, toString } = import std.core;
+let core = import std.core;
 
-$print(toString ([1,2,3,4]))
+let r = 
+    let rec fact n = if n <= 1 then 1 else fact (n - 1) * n in fact(5);
+core.print r;
+core.print(core.typeOf r);

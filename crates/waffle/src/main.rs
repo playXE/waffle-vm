@@ -35,6 +35,7 @@ fn main() -> Result<(), String> {
 
             let key = Value::Symbol(vm.intern("loadmodule"));
             let f = mload.field(vm, &key);
+
             let mut exc = None;
             let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 unsafe {

@@ -176,7 +176,7 @@ impl VM {
         &mut self.gc
     }
 
-    pub fn identity_cmp<T: Object + ?Sized>(&mut self, a: Gc<T>, b: Gc<T>) -> i64 {
+    pub fn identity_cmp<T: Object + ?Sized>(&mut self, a: Gc<T>, b: Gc<T>) -> i32 {
         let id1 = self.gc.identity(a);
         let id2 = self.gc.identity(b);
 
@@ -226,7 +226,8 @@ impl VM {
                         panic::resume_unwind(Box::new(VMTrap));
                     }
 
-                    trap = self.spmax.sub(self.trap as _);
+                    trap = self.spmax.cast::<u8>().sub(self.trap as _).cast::<Value>();
+                    println!("{:p} {:p} {}", trap, self.sp, self.trap);
                     if trap < self.sp {
                         // trap outside stack
                         self.trap = 0;
@@ -240,27 +241,25 @@ impl VM {
                     // restore state
                     self.vthis = trap.add(1).read();
                     self.env = match trap.add(2).read() {
-                        Value::Null => Nullable::NULL,
-                        Value::Abstract(x) => {
-                            x.downcast::<Array<Nullable<Upvalue>>>().unwrap().nullable()
-                        }
-                        _ => unreachable!(),
+                        x if x.is_null() => Nullable::NULL,
+                        x => x
+                            .downcast_ref::<Array<Nullable<Upvalue>>>()
+                            .unwrap()
+                            .nullable(),
                     };
 
                     ip = trap.add(3).read().int() as usize;
                     // if thrown from native code `module` is allowed to be null
-                    module.set(match trap.add(4).read() {
-                        Value::Module(x) => x.nullable(),
-                        Value::Null => Nullable::NULL,
-                        _ => unreachable!(),
-                    });
+                    module.set(trap.add(4).read().module());
                     // pop sp
                     sp = trap.add(6);
+
                     self.trap = trap.add(5).read().int() as _;
                     while self.sp < sp {
                         self.sp.write(Value::Null);
                         self.sp = self.sp.add(1);
                     }
+                    println!("trap sp {:p} {:p}", sp, self.sp);
                 }
                 Err(x) => panic::resume_unwind(x),
             }
@@ -354,56 +353,62 @@ impl VM {
         gc_frame!(self.gc().roots() => old_this: Value,old_env: Value,vthis: Value,f: Value);
         let mut ret = Value::Null;
 
-        if !matches!(vthis.get(), Value::Null) {
+        if !vthis.is_null() {
             self.vthis = vthis.get();
         }
         loop {
             self.setup_trap();
             let result = panic::catch_unwind(AssertUnwindSafe(|| match f.get() {
-                Value::Primitive(x) => {
-                    self.env = x.env;
-                    if args.len() as u32 != x.nargs && !x.varsize {
-                        self.throw_str(&format!(
-                            "argument count does not match: {} != {}",
-                            args.len(),
-                            x.nargs
-                        ));
-                    }
-                    ret =
-                        dispatch_func2(self, args.as_ptr() as _, x.addr, args.len() as _, x.varsize)
-                }
-                Value::Function(x) => {
-                    if args.len() == x.nargs as usize {
-                        if self.csp.add(4) >= self.sp.sub(args.len()) {
-                            if exc.is_some() {
-                                self.process_trap();
-                            }
-                            self.throw_str("stack overflow");
-                        }
-                    } else {
-                        for i in 0..args.len() {
-                            self.sp = self.sp.sub(1);
-                            self.sp.write(args[i]);
-                        }
-
+                x if x.is_function() => {
+                    let x = x.prim_or_func();
+                    if x.prim {
                         self.env = x.env;
+                        if args.len() as u32 != x.nargs && !x.varsize {
+                            self.throw_str(&format!(
+                                "argument count does not match: {} != {}",
+                                args.len(),
+                                x.nargs
+                            ));
+                        }
+                        ret = dispatch_func2(
+                            self,
+                            args.as_ptr() as _,
+                            x.addr,
+                            args.len() as _,
+                            x.varsize,
+                        )
+                    } else {
+                        if args.len() == x.nargs as usize {
+                            if self.csp.add(4) >= self.sp.sub(args.len()) {
+                                if exc.is_some() {
+                                    self.process_trap();
+                                }
+                                self.throw_str("stack overflow");
+                            }
+                        } else {
+                            for i in 0..args.len() {
+                                self.sp = self.sp.sub(1);
+                                self.sp.write(args[i]);
+                            }
 
-                        self.csp = self.csp.add(1);
-                        self.csp.write(Value::Function(self.callback_ret.as_gc()));
+                            self.env = x.env;
 
-                        self.csp = self.csp.add(1);
-                        self.csp.write(Value::Int(0));
-                        self.csp = self.csp.add(1);
-                        self.csp.write(Value::Int(0));
-                        self.csp = self.csp.add(1);
-                        self.csp.write(Value::Module(self.callback_mod.as_gc()));
+                            self.csp = self.csp.add(1);
+                            self.csp.write(Value::Function(self.callback_ret.as_gc()));
 
-                        ret = self.interp(x.module, Value::Null, x.addr);
+                            self.csp = self.csp.add(1);
+                            self.csp.write(Value::Int(0));
+                            self.csp = self.csp.add(1);
+                            self.csp.write(Value::Int(0));
+                            self.csp = self.csp.add(1);
+                            self.csp
+                                .write(Value::encode_object_value(self.callback_mod.as_gc()));
+
+                            ret = self.interp(x.module, Value::Null, x.addr);
+                        }
                     }
                 }
-                _ => {
-                    self.throw_str("Invalid call");
-                }
+                _ => self.throw_str("invalid call"),
             }));
 
             match result {
@@ -443,9 +448,11 @@ impl VM {
         self.csp = sp;
         self.vthis = trap.add(1).read();
         self.env = match trap.add(2).read() {
-            Value::Null => Nullable::NULL,
-            Value::Abstract(x) => x.downcast::<Array<Nullable<Upvalue>>>().unwrap().nullable(),
-            _ => unreachable!(),
+            x if x.is_null() => Nullable::NULL,
+            x => x
+                .downcast_ref::<Array<Nullable<Upvalue>>>()
+                .unwrap()
+                .nullable(),
         };
 
         sp = trap.add(6);
@@ -624,9 +631,11 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
             csp = csp.sub(1);
 
             vm.env = match csp.read() {
-                Value::Null => Nullable::NULL,
-                Value::Abstract(x) => x.downcast::<Array<Nullable<Upvalue>>>().unwrap().nullable(),
-                _ => unreachable!(),
+                x if x.is_null() => Nullable::NULL,
+                x => x
+                    .downcast_ref::<Array<Nullable<Upvalue>>>()
+                    .unwrap()
+                    .nullable(),
             };
             csp.write(Value::Null);
             csp = csp.sub(1);
@@ -658,7 +667,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
             csp.write(if m.get().is_null() {
                 Value::Null
             } else {
-                Value::Module(m.get().as_gc())
+                Value::encode_object_value(m.get().as_gc())
             });
         };
     }
@@ -682,7 +691,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
             let id = Value::Symbol(vm.intern(stringify!($id)));
             let f = $obj.field(vm, &id);
             match f {
-                Value::Null => $err,
+                x if !x.is_function() => $err,
                 _ => {
                     push_infos!();
                     save!();
@@ -718,27 +727,30 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
     macro_rules! do_call {
         ($cur_this: expr,$nargs: expr) => {
             match acc.get() {
-                Value::Function(func) => {
-                    push_infos!();
-                    m.set(func.module);
-                    ip = func.addr as _;
-                    vm.vthis = $cur_this;
-                    vm.env = func.env;
-                    // store number of arguments in accumulator register
-                    acc.set(Value::Int($nargs as _));
-                }
-                Value::Primitive(prim) => {
-                    if $nargs as u32 != prim.nargs && !prim.varsize {
-                        vm.throw_str(&format!(
-                            "argument count does not match: {} != {}",
-                            $nargs, prim.nargs
-                        ));
-                    }
-                    setup_before_call!($cur_this);
+                x if x.is_function() => {
+                    let func = x.prim_or_func();
+                    if !func.prim {
+                        push_infos!();
+                        m.set(func.module);
+                        ip = func.addr as _;
+                        vm.vthis = $cur_this;
+                        vm.env = func.env;
+                        // store number of arguments in accumulator register
+                        acc.set(Value::Int($nargs as _));
+                    } else {
+                        let prim = func;
+                        if $nargs as u32 != prim.nargs && !prim.varsize {
+                            vm.throw_str(&format!(
+                                "argument count does not match: {} != {}",
+                                $nargs, prim.nargs
+                            ));
+                        }
+                        setup_before_call!($cur_this);
 
-                    acc.set(dispatch_func(vm, sp, prim.addr, $nargs as _, prim.varsize));
-                    restore_after_call!();
-                    pop!($nargs);
+                        acc.set(dispatch_func(vm, sp, prim.addr, $nargs as _, prim.varsize));
+                        restore_after_call!();
+                        pop!($nargs);
+                    }
                 }
                 _ => vm.throw_str(&format!("call failure: {}", acc.get())),
             }
@@ -751,19 +763,17 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
             restore!();
             sp.write(Value::Null);
             sp = sp.add(1);
-            match tmp {
-                Value::Int(x) => {
-                    acc.set(Value::Bool(x $op 0 && x != INVALID_CMP as i64));
-                }
-                _ => unreachable!()
-            }
+            let x = tmp.get_int32();
+            acc.set(Value::Bool(x $op 0 && x != INVALID_CMP));
+
+
         }};
     }
 
     macro_rules! intop {
         ($op: tt) => {{
             match (acc.get(),sp.read()) {
-                (Value::Int(x),Value::Int(y)) => { acc.set(Value::Int(x $op y)); },
+                (x,y) if x.is_int32() && y.is_int32() => { acc.set(Value::Int(x.get_int32() $op y.get_int32())); },
                 _ => vm.throw_str(concat!("incompatible types for '", stringify!($op), "'"))
             }
             sp.write(Value::Null);
@@ -774,7 +784,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
         unsafe {
             let op = m.get()[ip];
             let op = std::mem::transmute::<_, Op>(op);
-            println!("{} {:?}", ip, op);
+            //println!("{}: {:?}", ip, op);
             ip += 1;
             match op {
                 AccNull => {
@@ -791,13 +801,12 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                     acc.set(vm.vthis);
                 }
                 AccInt(int) => {
-                    acc.set(Value::Int(int as i64));
+                    acc.set(Value::Int(int as i32));
                 }
                 AccStack(ix) => {
                     acc.set(sp.offset(ix as _).read());
                 }
                 AccGlobal(ix) => {
-                    println!("{:p} {} {}", m.as_gc(), ix, 0);
                     acc.set(m.globals[ix as usize]);
                 }
                 AccField(ix) => {
@@ -805,7 +814,8 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                     let object = acc.get();
 
                     match object {
-                        Value::Object(mut object) => {
+                        x if x.is_obj() => {
+                            let mut object = x.downcast_ref::<Obj>().unwrap();
                             gc_frame!(vm.gc().roots() => object: Gc<Obj>,name: Value);
                             let tmp = object.field(vm, &name);
 
@@ -815,53 +825,53 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                         _ => vm.throw_str("invalid field access"),
                     }
                 }
-                AccArray => match (acc.get(), &mut *sp) {
-                    (Value::Int(x), Value::Array(arr)) => {
+                AccArray => {
+                    if acc.is_int32() && (*sp).is_array() {
+                        let x = acc.get_int32();
+                        let arr = (*sp).downcast_ref::<Array<Value>>().unwrap();
                         let k = x;
-                        if k < 0 || k >= arr.len() as i64 {
+                        if k < 0 || k >= arr.len() as i32 {
                             acc.set(Value::Null);
                         } else {
                             acc.set(arr[k as usize]);
                         }
 
                         sp = sp.add(1);
-                    }
-
-                    (_, Value::Object(obj)) => {
+                    } else if (*sp).is_obj() {
+                        let mut obj = (*sp).downcast_ref::<Obj>().unwrap();
+                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
                         object_op!(obj, acc.as_ref(), __get);
                         sp.write(Value::Null);
                         sp = sp.add(1);
+                    } else {
+                        vm.throw_str("invalid array access");
                     }
-                    _ => vm.throw_str("invalid array access"),
-                },
-                AccIndex(ix) => match acc.get() {
-                    Value::Array(arr) => {
+                }
+                AccIndex(ix) => {
+                    if let Some(arr) = acc.downcast_ref::<Array<Value>>() {
                         if ix < 0 || ix >= arr.len() as i32 {
                             acc.set(Value::Null);
                         } else {
                             acc.set(arr[ix as usize]);
                         }
-                    }
-                    Value::Object(mut obj) => {
-                        gc_frame!(vm.gc.roots() => obj: Gc<Obj>);
+                    } else if let Some(mut obj) = acc.downcast_ref::<Obj>() {
+                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
                         object_op!(obj.as_mut(), acc.as_ref(), __get);
+                    } else {
+                        vm.throw_str("invalid array access")
                     }
-                    _ => vm.throw_str("invalid array access"),
-                },
+                }
                 AccBuiltinResolved(val) => {
                     acc.set(val);
                 }
                 AccBuiltin(ix) => {
                     let f = &m.globals[ix as usize];
-                    match vm.builtins {
-                        Value::Object(obj) => {
-                            let field = obj.field(vm, f);
-                            *acc = field;
-                            // patch code so next builtin load is O(1)
-                            m[ip - 1] = Op::AccBuiltinResolved(field);
-                        }
-                        _ => unreachable!(),
-                    }
+                    let obj = vm.builtins.downcast_ref::<Obj>().unwrap_unchecked();
+
+                    let field = obj.field(vm, f);
+                    *acc = field;
+                    // patch code so next builtin load is O(1)
+                    m[ip - 1] = Op::AccBuiltinResolved(field);
                 }
 
                 AccEnv(ix) => {
@@ -884,16 +894,19 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                 }
                 SetField(ix) => {
                     let field = &m.globals[ix as usize];
-                    match &mut *sp {
-                        Value::Object(object) => object.insert(vm, field, acc.as_ref()),
-                        _ => vm.throw_str("invalid field access"),
-                    };
+                    let obj = *sp;
+                    if let Some(mut object) = obj.downcast_ref::<Obj>() {
+                        gc_frame!(vm.gc().roots() => object: Gc<Obj>);
+                        object.insert(vm, field, acc.as_ref());
+                    } else {
+                        vm.throw_str("invalid field access");
+                    }
 
                     sp.write(Value::Null);
                     sp = sp.add(1);
                 }
                 SetArray => {
-                    match (&mut *sp, &*sp.add(1)) {
+                    /*match (&mut *sp, &*sp.add(1)) {
                         (Value::Array(arr), Value::Int(k)) => {
                             let k = *k;
                             if k < arr.len() as i64 && k >= 0 {
@@ -916,14 +929,39 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                             pop_infos!(false);
                         }
                         _ => vm.throw_str("invalid array access"),
+                    }*/
+                    if (*sp).is_array() && (*sp.add(1)).is_int32() {
+                        let k = sp.add(1).read().get_int32();
+                        let mut arr = sp.read().array();
+                        if k < arr.len() as i32 && k >= 0 {
+                            arr[k as usize] = acc.get();
+                            vm.gc().write_barrier(arr);
+                        }
+                    } else if (*sp).is_obj() {
+                        let arg0 = sp.add(1).read();
+                        let string = vm.intern("__set");
+                        let object = sp.read().downcast_ref::<Obj>().unwrap_unchecked();
+                        let mut f = object.field(vm, &Value::Symbol(string));
+                        if !f.is_function() {
+                            vm.throw_str("unsupported operation");
+                        }
+                        let mut args = [arg0, acc.get()];
+                        gc_frame!(vm.gc().roots() => f: Value,args: [Value;2]);
+                        push_infos!();
+                        save!();
+                        vm.callex(sp.read(), f.get(), args.as_ref(), &mut None);
+                        restore!();
+                        pop_infos!(false);
+                    } else {
+                        vm.throw_str("invalid array access");
                     }
                     sp.write(Value::Null);
                     sp = sp.add(1);
                     sp.write(Value::Null);
                     sp = sp.add(1);
                 }
-                SetIndex(ix) => {
-                    match &mut *sp {
+                SetIndex(k) => {
+                    /*match &mut *sp {
                         Value::Array(arr) => {
                             if ix >= 0 && ix < arr.len() as i32 {
                                 arr[ix as usize] = acc.get();
@@ -945,7 +983,32 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                             pop_infos!(false);
                         }
                         _ => vm.throw_str("Invalid array access"),
+                    }*/
+                    if (*sp).is_array() {
+                        let mut arr = sp.read().array();
+                        if k < arr.len() as i32 && k >= 0 {
+                            arr[k as usize] = acc.get();
+                            vm.gc().write_barrier(arr);
+                        }
+                    } else if (*sp).is_obj() {
+                        let arg0 = Value::Int(k);
+                        let string = vm.intern("__set");
+                        let object = sp.read().downcast_ref::<Obj>().unwrap_unchecked();
+                        let mut f = object.field(vm, &Value::Symbol(string));
+                        if !f.is_function() {
+                            vm.throw_str("unsupported operation");
+                        }
+                        let mut args = [arg0, acc.get()];
+                        gc_frame!(vm.gc().roots() => f: Value,args: [Value;2]);
+                        push_infos!();
+                        save!();
+                        vm.callex(sp.read(), f.get(), args.as_ref(), &mut None);
+                        restore!();
+                        pop_infos!(false);
+                    } else {
+                        vm.throw_str("invalid array access");
                     }
+
                     sp.write(Value::Null);
                     sp = sp.add(1);
                 }
@@ -1024,21 +1087,22 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
 
                 Trap(ix) => {
                     sp = sp.sub(6);
-                    sp.write(Value::Int(vm.csp as i64 - vm.spmin as i64));
+                    sp.write(Value::Int(vm.csp as i32 - vm.spmin as i32));
                     sp.add(1).write(vm.vthis);
                     sp.add(2).write(if vm.env.is_not_null() {
                         Value::Abstract(vm.env.as_gc().as_dyn())
                     } else {
                         Value::Null
                     });
-                    sp.add(3).write(Value::Int(ix as _));
+                    sp.add(3).write(Value::Int(ip as i32 + ix as i32));
                     sp.add(4).write(if m.is_null() {
                         Value::Null
                     } else {
-                        Value::Module(m.as_gc())
+                        Value::encode_object_value(m.as_gc())
                     });
                     sp.add(5).write(Value::Int(vm.trap as _));
                     vm.trap = vm.spmax as isize - sp as isize;
+                    println!("SET TRAP {:x} {:p}", vm.trap, sp);
                 }
                 EndTrap => {
                     vm.trap = sp.add(5).read().int() as _;
@@ -1062,7 +1126,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                     gc_frame!(vm.gc().roots() => func: Gc<Function>, upvals: Gc<Array<Value>>, real_upvals: Gc<Array<Nullable<Upvalue>>>);
 
                     for i in 0..upvals.len() {
-                        let [is_local, index] = std::mem::transmute::<_, [i32; 2]>(upvals[i].int());
+                        let [is_local, index] = std::mem::transmute::<_, [i16; 2]>(upvals[i].int());
                         if is_local == 0 {
                             real_upvals[i] = vm.env[index as usize];
                         } else {
@@ -1101,6 +1165,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                         addr: func.addr,
                         nargs: func.nargs,
                         varsize: func.varsize,
+                        prim: func.prim,
                     })));
                 }
 
@@ -1119,7 +1184,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
 
                 Bool => {
                     let v = acc.get();
-                    if matches!(v, Value::Bool(true)) || matches!(v, Value::Bool(false)) {
+                    if v.is_true() || v.is_false() {
                         acc.set(Value::Bool(false));
                     } else {
                         acc.set(Value::Bool(true));
@@ -1128,149 +1193,181 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
 
                 Not => {
                     let v = acc.get();
-                    if matches!(v, Value::Bool(false) | Value::Null) {
+                    if v.is_null() || v.is_false() {
                         acc.set(Value::Bool(true));
                     } else {
                         acc.set(Value::Bool(false));
                     }
                 }
-                Add => match (acc.get(), &mut *sp) {
-                    (Value::Int(x), Value::Int(y)) => {
-                        acc.set(Value::Int(y.wrapping_add(x)));
+                Add => {
+                    /*  match (acc.get(), &mut *sp) {
+                        (Value::Int(x), Value::Int(y)) => {
+                            acc.set(Value::Int(y.wrapping_add(x)));
+                            pop!(1);
+                        }
+                        (x, y) if x.is_numeric() && y.is_numeric() => {
+                            let y = y.get_number();
+                            let x = x.get_number();
+                            acc.set(Value::Float(x + y));
+                            pop!(1);
+                        }
+                        (_, Value::Object(obj)) => {
+                            object_op!(obj, acc.as_ref(), __add);
+                            pop!(1);
+                        }
+                        _ => vm.throw_str(&format!("wrong operands for +: {} {}", acc.get(), *sp)),
+                    }*/
+                    let rhs = acc.get();
+                    let lhs = sp.read();
+                    if lhs.is_int32() && rhs.is_int32() {
+                        acc.set(Value::Int(lhs.get_int32().wrapping_add(rhs.get_int32())));
                         pop!(1);
-                    }
-                    (x, y) if x.is_numeric() && y.is_numeric() => {
-                        let y = y.get_number();
-                        let x = x.get_number();
-                        acc.set(Value::Float(x + y));
+                    } else if lhs.is_number() && rhs.is_number() {
+                        acc.set(Value::Float(lhs.get_number() + rhs.get_number()));
                         pop!(1);
-                    }
-                    (_, Value::Object(obj)) => {
+                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
+                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
                         object_op!(obj, acc.as_ref(), __add);
                         pop!(1);
+                    } else {
+                        vm.throw_str(&format!("wrong operands for +: {} {}", acc.get(), *sp));
                     }
-                    _ => vm.throw_str(&format!("wrong operands for +: {} {}", acc.get(), *sp)),
-                },
-                Sub => match (acc.get(), &mut *sp) {
-                    (Value::Int(x), Value::Int(y)) => {
-                        acc.set(Value::Int(y.wrapping_sub(x)));
+                }
+                Sub => {
+                    let rhs = acc.get();
+                    let lhs = sp.read();
+                    if lhs.is_int32() && rhs.is_int32() {
+                        acc.set(Value::Int(lhs.get_int32().wrapping_sub(rhs.get_int32())));
                         pop!(1);
-                    }
-                    (x, y) if x.is_numeric() && y.is_numeric() => {
-                        let y = y.get_number();
-                        let x = x.get_number();
-                        acc.set(Value::Float(x - y));
+                    } else if lhs.is_number() && rhs.is_number() {
+                        acc.set(Value::Float(lhs.get_number() - rhs.get_number()));
                         pop!(1);
-                    }
-                    (_, Value::Object(obj)) => {
+                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
+                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
                         object_op!(obj, acc.as_ref(), __sub);
                         pop!(1);
+                    } else {
+                        vm.throw_str(&format!("wrong operands for -: {} {}", acc.get(), *sp));
                     }
-                    _ => vm.throw_str("wrong operands for -"),
-                },
+                }
 
-                Div => match (acc.get(), &mut *sp) {
-                    (Value::Int(x), Value::Int(y)) => {
-                        acc.set(Value::Int(y.wrapping_div(x)));
+                Div => {
+                    let rhs = acc.get();
+                    let lhs = sp.read();
+                    if lhs.is_int32() && rhs.is_int32() {
+                        acc.set(Value::Int(lhs.get_int32().wrapping_div(rhs.get_int32())));
                         pop!(1);
-                    }
-                    (x, y) if x.is_numeric() && y.is_numeric() => {
-                        let x = x.get_number();
-                        let y = y.get_number();
-                        acc.set(Value::Float(y / x));
+                    } else if lhs.is_number() && rhs.is_number() {
+                        acc.set(Value::Float(lhs.get_number() / rhs.get_number()));
                         pop!(1);
-                    }
-                    (_, Value::Object(obj)) => {
+                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
+                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
                         object_op!(obj, acc.as_ref(), __div);
                         pop!(1);
+                    } else {
+                        vm.throw_str(&format!("wrong operands for /: {} {}", acc.get(), *sp));
                     }
-                    _ => vm.throw_str("wrong operands for /"),
-                },
-                Mul => match (acc.get(), &mut *sp) {
-                    (Value::Int(x), Value::Int(y)) => {
-                        acc.set(Value::Int(y.wrapping_mul(x)));
+                }
+
+                Mul => {
+                    let rhs = acc.get();
+                    let lhs = sp.read();
+                    if lhs.is_int32() && rhs.is_int32() {
+                        acc.set(Value::Int(lhs.get_int32().wrapping_mul(rhs.get_int32())));
                         pop!(1);
-                    }
-                    (x, y) if x.is_numeric() && y.is_numeric() => {
-                        let x = x.get_number();
-                        let y = y.get_number();
-                        acc.set(Value::Float(y * x));
+                    } else if lhs.is_number() && rhs.is_number() {
+                        acc.set(Value::Float(lhs.get_number() * rhs.get_number()));
                         pop!(1);
-                    }
-                    (_, Value::Object(obj)) => {
+                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
+                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
                         object_op!(obj, acc.as_ref(), __mul);
                         pop!(1);
+                    } else {
+                        vm.throw_str(&format!("wrong operands for *: {} {}", acc.get(), *sp));
                     }
-                    _ => vm.throw_str("wrong operands for *"),
-                },
-                Mod => match (acc.get(), &mut *sp) {
-                    (Value::Int(x), Value::Int(y)) => {
-                        acc.set(Value::Int(y.wrapping_rem(x)));
+                }
+
+                Mod => {
+                    let rhs = acc.get();
+                    let lhs = sp.read();
+                    if lhs.is_int32() && rhs.is_int32() {
+                        acc.set(Value::Int(lhs.get_int32().wrapping_rem(rhs.get_int32())));
                         pop!(1);
-                    }
-                    (x, y) if x.is_numeric() && y.is_numeric() => {
-                        let x = x.get_number();
-                        let y = y.get_number();
-                        acc.set(Value::Float(y % x));
+                    } else if lhs.is_number() && rhs.is_number() {
+                        acc.set(Value::Float(lhs.get_number() % rhs.get_number()));
                         pop!(1);
-                    }
-                    (_, Value::Object(obj)) => {
+                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
+                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
                         object_op!(obj, acc.as_ref(), __mod);
                         pop!(1);
+                    } else {
+                        vm.throw_str(&format!("wrong operands for %: {} {}", acc.get(), *sp));
                     }
-                    _ => vm.throw_str("wrong operands for *"),
-                },
-                Shl => match (acc.get(), &mut *sp) {
-                    (Value::Int(x), Value::Int(y)) => {
-                        acc.set(Value::Int(y.wrapping_shl(x as _)));
+                }
+                Shl => {
+                    let rhs = acc.get();
+                    let lhs = sp.read();
+                    if lhs.is_int32() && rhs.is_int32() {
+                        acc.set(Value::Int(
+                            lhs.get_int32().wrapping_shl(rhs.get_int32() as _),
+                        ));
                         pop!(1);
-                    }
-                    (x, y) if x.is_numeric() && y.is_numeric() => {
-                        let x = x.get_number() as i64;
-                        let y = y.get_number() as i64;
-                        acc.set(Value::Int(y.wrapping_shl(x as _)));
+                    } else if lhs.is_number() && rhs.is_number() {
+                        acc.set(Value::Int(
+                            (lhs.get_number() as i32).wrapping_shl(rhs.get_number() as _),
+                        ));
                         pop!(1);
-                    }
-                    (_, Value::Object(obj)) => {
+                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
+                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
                         object_op!(obj, acc.as_ref(), __shl);
                         pop!(1);
+                    } else {
+                        vm.throw_str(&format!("wrong operands for <<: {} {}", acc.get(), *sp));
                     }
-                    _ => vm.throw_str("wrong operands for <<"),
-                },
-                Shr => match (acc.get(), &mut *sp) {
-                    (Value::Int(x), Value::Int(y)) => {
-                        acc.set(Value::Int(y.wrapping_shr(x as _)));
+                }
+
+                Shr => {
+                    let rhs = acc.get();
+                    let lhs = sp.read();
+                    if lhs.is_int32() && rhs.is_int32() {
+                        acc.set(Value::Int(
+                            lhs.get_int32().wrapping_shr(rhs.get_int32() as _),
+                        ));
                         pop!(1);
-                    }
-                    (y, x) if x.is_numeric() && y.is_numeric() => {
-                        let x = x.get_number() as i64;
-                        let y = y.get_number() as i64;
-                        acc.set(Value::Int(y.wrapping_shr(x as _)));
+                    } else if lhs.is_number() && rhs.is_number() {
+                        acc.set(Value::Int(
+                            (lhs.get_number() as i32).wrapping_shr(rhs.get_number() as _),
+                        ));
                         pop!(1);
-                    }
-                    (_, Value::Object(obj)) => {
+                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
+                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
                         object_op!(obj, acc.as_ref(), __shr);
                         pop!(1);
+                    } else {
+                        vm.throw_str(&format!("wrong operands for >>: {} {}", acc.get(), *sp));
                     }
-                    _ => vm.throw_str("wrong operands for <<"),
-                },
-                UShr => match (acc.get(), &mut *sp) {
-                    (Value::Int(x), Value::Int(y)) => {
-                        acc.set(Value::Int((x as u64).wrapping_shr(*y as _) as i64));
+                }
+                UShr => {
+                    let rhs = acc.get();
+                    let lhs = sp.read();
+                    if lhs.is_int32() && rhs.is_int32() {
+                        acc.set(Value::Int(
+                            ((lhs.get_int32() as u32).wrapping_shl(rhs.get_int32() as _)) as i32,
+                        ));
                         pop!(1);
-                    }
-                    (x, y) if x.is_numeric() && y.is_numeric() => {
-                        let x = x.get_number() as u32;
-                        let y = y.get_number() as u64;
-                        acc.set(Value::Int(y.wrapping_shr(x) as _));
+                    } else if lhs.is_number() && rhs.is_number() {
+                        acc.set(Value::Int(
+                            (lhs.get_number() as u32).wrapping_shl(rhs.get_number() as _) as i32,
+                        ));
                         pop!(1);
-                    }
-                    (_, Value::Object(obj)) => {
+                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
+                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
                         object_op!(obj, acc.as_ref(), __ushr);
                         pop!(1);
+                    } else {
+                        vm.throw_str(&format!("wrong operands for <<: {} {}", acc.get(), *sp));
                     }
-                    _ => vm.throw_str("wrong operands for <<"),
-                },
+                }
                 Eq => test!(==),
                 Neq => test!(!=),
                 Gt => test!(>),
@@ -1281,17 +1378,17 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                     save!();
                     let c = value_cmp(vm, &*sp, &*acc);
                     restore!();
-                    acc.set(if matches!(c, Value::Int(INVALID_CMP)) {
+                    acc.set(if c.get_int32() == INVALID_CMP {
                         Value::Null
                     } else {
                         c
                     });
                 }
                 IsNull => {
-                    acc.set(Value::Bool(matches!(acc.get(), Value::Null)));
+                    acc.set(Value::Bool(acc.get().is_null()));
                 }
                 IsNotNull => {
-                    acc.set(Value::Bool(!matches!(acc.get(), Value::Null)));
+                    acc.set(Value::Bool(!acc.is_null()));
                 }
                 Or => intop!(|),
                 And => intop!(&),
@@ -1303,7 +1400,9 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                 New => {
                     save!();
                     acc.set(match acc.get() {
-                        Value::Object(x) => Value::Object(Obj::with_proto(vm, x)),
+                        x if x.is_obj() => {
+                            Value::Object(Obj::with_proto(vm, x.downcast_ref().unwrap_unchecked()))
+                        }
                         _ => Value::Object(Obj::new(vm)),
                     });
                 }
@@ -1356,6 +1455,7 @@ fn callback_return(vm: &mut VM) -> (Gc<Function>, Gc<Module>) {
             env: Nullable::NULL,
             addr: 0,
             module: module.nullable(),
+            prim: false,
         });
 
         (func.assume_init(), module)

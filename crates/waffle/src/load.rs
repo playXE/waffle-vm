@@ -7,10 +7,10 @@ use std::{
 use crate::{
     builtin::make_prim,
     gc_frame,
-    memory::gcwrapper::{Array, Gc, Nullable},
+    memory::gcwrapper::{Array, Gc, Nullable, Str},
     opcode::Op,
     reflect::Global,
-    value::{Function, Module, Obj, Value},
+    value::{Function, Module, Obj, Sym, Value},
     vm::{Id, Lib, LibList, VM},
 };
 
@@ -47,11 +47,12 @@ pub fn read_module(vm: &mut VM, ops: &[Op], globals: &[Rc<Global>], loader: Valu
                         env: Nullable::NULL,
                         module: module.nullable(),
                         addr: *pos as usize,
+                        prim: false,
                     });
                     Value::Function(func)
                 }
                 Global::Float(x) => Value::Float(f64::from_bits(*x)),
-                Global::Int(x) => Value::Int(*x),
+                Global::Int(x) => Value::Int(*x as i32),
                 Global::Str(x) => Value::Str(vm.gc().str(x)),
                 Global::Symbol(x) => Value::Symbol(vm.intern(x)),
                 Global::Var(_) => Value::Null,
@@ -59,7 +60,7 @@ pub fn read_module(vm: &mut VM, ops: &[Op], globals: &[Rc<Global>], loader: Valu
                     let mut arr = vm.gc().array(upvals.len(), Value::Null);
                     for i in 0..upvals.len() {
                         let (local, ix) = upvals[i];
-                        let int = std::mem::transmute::<_, i64>([local as i32, ix as i32]);
+                        let int = std::mem::transmute::<_, i32>([local as i16, ix as i16]);
                         arr[i] = Value::Int(int);
                     }
                     Value::Array(arr)
@@ -76,14 +77,13 @@ pub fn read_module(vm: &mut VM, ops: &[Op], globals: &[Rc<Global>], loader: Valu
                 Op::AccBuiltin(ix) => {
                     let f = module.globals[ix as usize];
                     match f {
-                        Value::Symbol(x) => match &**x.name {
+                        x if x.is_symbol() => match &**x.downcast_ref::<Sym>().unwrap().name {
                             "loader" => module[i] = Op::AccBuiltinResolved(loader),
                             "exports" => module[i] = Op::AccBuiltinResolved(module.exports),
                             _ => {
-                                if let Value::Object(builtins) = vm.builtins {
-                                    let tmp = builtins.field(vm, &f);
-                                    module[i] = Op::AccBuiltinResolved(tmp);
-                                }
+                                let b = vm.builtins;
+                                let tmp = b.field(vm, &f);
+                                module[i] = Op::AccBuiltinResolved(tmp);
                             }
                         },
                         x => unreachable!("{:?}", x),
@@ -139,7 +139,7 @@ pub extern "C" fn load_module(vm: &mut VM, mname: &Value, vthis: &Value) -> Valu
     {
         let mut mid = Value::Symbol(vm.intern(format!("{}", mname)));
         let mv = cache.field(vm, &mid);
-        if let Value::Module(module) = mv {
+        if let Some(module) = mv.downcast_ref::<Module>() {
             return module.exports;
         }
         let path = o.field(vm, &spath).array();
@@ -148,7 +148,7 @@ pub extern "C" fn load_module(vm: &mut VM, mname: &Value, vthis: &Value) -> Valu
             .unwrap_or_else(|err| vm.throw_str(format!("failed to open module: {}", err)));
         let (ops, globals) = crate::bytecode::read_module(&code);
         let mut m = read_module(vm, &ops, &globals, *vthis);
-        let mut mv = Value::Module(m);
+        let mut mv = Value::encode_object_value(m);
         gc_frame!(vm.gc().roots() => m: Gc<Module>, mv:Value, mid:Value);
         cache.set_field(vm, &mid, &mv);
         match vm.execute(m.get()) {
@@ -177,17 +177,18 @@ pub fn load_primitive(
     prim: &Value,
     nargs: &Value,
 ) -> usize {
-    let nargs = if let Value::Int(nargs) = nargs {
-        if *nargs < 0 {
+    let nargs = if nargs.is_int32() {
+        let nargs = nargs.get_int32();
+        if nargs < 0 {
             -1i32
         } else {
-            *nargs as i32
+            nargs as i32
         }
     } else {
         vm.throw_str("`loadprimitive` expects number of arguments to be passed as integer")
     };
 
-    let prim = if let Value::Str(str) = prim {
+    let prim = if let Some(str) = prim.downcast_ref::<Str>() {
         str.to_string()
     } else {
         vm.throw_str("`loadprimitive` expects string as primitive name");
@@ -255,11 +256,8 @@ pub extern "C" fn loader_loadprim(vm: &mut VM, prim: &Value, nargs: &Value) -> V
     let o = vm.vthis;
     let id = vm.id(Id::Libs);
     let libs = o.field(vm, &Value::Symbol(id));
-    let mut libs = match libs {
-        Value::Abstract(x) => match x.downcast::<LibList>() {
-            Some(liblist) => liblist,
-            _ => vm.throw_str("library list malformed"),
-        },
+    let mut libs = match libs.downcast_ref::<LibList>() {
+        Some(liblist) => liblist,
         _ => vm.throw_str("library list malformed"),
     };
 
@@ -278,6 +276,7 @@ pub extern "C" fn loader_loadprim(vm: &mut VM, prim: &Value, nargs: &Value) -> V
         env: Nullable::NULL,
         module: Nullable::NULL,
         addr: ptr,
+        prim: true,
     });
     Value::Primitive(f)
 }

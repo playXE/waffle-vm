@@ -1,7 +1,7 @@
 use crate::{
     gc_frame,
-    memory::gcwrapper::{Array, Gc, Nullable},
-    value::{Cell, Function, Obj, Value},
+    memory::gcwrapper::{Array, Gc, Nullable, Str},
+    value::{Cell, Function, Obj, Sym, Value},
     vm::VM,
 };
 
@@ -14,6 +14,7 @@ pub fn make_prim(vm: &mut VM, f: usize, nargs: usize, var: bool) -> Value {
         varsize: var,
         env: Nullable::NULL,
         module: Nullable::NULL,
+        prim: true,
     };
 
     Value::Primitive(vm.gc().fixed(prim))
@@ -35,7 +36,7 @@ pub extern "C" fn builtin_amake(vm: &mut VM, size: &Value) -> Value {
 }
 
 pub extern "C" fn builtin_asize(vm: &mut VM, a: &Value) -> Value {
-    if !matches!(a, Value::Array(_)) {
+    if !a.is_array() {
         vm.throw_str("array expected");
     }
 
@@ -44,7 +45,7 @@ pub extern "C" fn builtin_asize(vm: &mut VM, a: &Value) -> Value {
 }
 
 pub extern "C" fn builtin_acopy(vm: &mut VM, a: &Value) -> Value {
-    if !matches!(a, Value::Array(_)) {
+    if !a.is_array() {
         vm.throw_str("array expected");
     }
 
@@ -78,7 +79,7 @@ pub extern "C" fn builtin_throw(vm: &mut VM, val: &Value) -> Value {
 ///
 /// Creates new object with specified prototype or no prototype if null
 pub extern "C" fn builtin_new(vm: &mut VM, val: &Value) -> Value {
-    if !matches!(val, Value::Null | Value::Object(_)) {
+    if !val.is_null() && !val.is_obj() {
         vm.throw_str(&format!(
             "`new` expects object or null value as argument but `{}` was found",
             val
@@ -86,7 +87,9 @@ pub extern "C" fn builtin_new(vm: &mut VM, val: &Value) -> Value {
     }
 
     match val {
-        Value::Object(proto) => Value::Object(Obj::with_proto(vm, *proto)),
+        proto if proto.is_obj() => {
+            Value::Object(Obj::with_proto(vm, proto.downcast_ref().unwrap()))
+        }
         _ => Value::Object(Obj::new(vm)),
     }
 }
@@ -95,20 +98,28 @@ pub extern "C" fn builtin_new(vm: &mut VM, val: &Value) -> Value {
 ///
 /// Interns new symbol
 pub extern "C" fn builtin_symbol(vm: &mut VM, val: &Value) -> Value {
-    match val {
+    /*match val {
         Value::Symbol(_) => *val,
         Value::Str(x) => Value::Symbol(vm.intern(&***x)),
         _ => vm.throw_str("`symbol` expects string as argument"),
+    }*/
+    if let Some(sym) = val.downcast_ref::<Sym>() {
+        Value::Symbol(sym)
+    } else if let Some(mut str) = val.downcast_ref::<Str>() {
+        gc_frame!(vm.gc().roots() => str: Gc<Str>);
+        Value::Symbol(vm.intern(&***str))
+    } else {
+        vm.throw_str("`symbol` expects string as argument")
     }
 }
 
 pub extern "C" fn builtin_ofields(vm: &mut VM, obj: &Value) -> Value {
-    match obj {
+    /*match obj {
         Value::Object(ref object) => {
             let mut arr = vm.gc().array(object.table.count, Value::Null);
 
             gc_frame!(vm.gc().roots() => arr: Gc<Array<Value>>);
-
+            let mut c = 0;
             for i in 0..object.table.cells.len() {
                 let mut cell = object.table.cells[i];
                 gc_frame!(vm.gc().roots() => cell: Nullable<Cell>);
@@ -116,7 +127,8 @@ pub extern "C" fn builtin_ofields(vm: &mut VM, obj: &Value) -> Value {
                     let mut farr = vm.gc().array(2, Value::Null);
                     farr[0] = cell.key;
                     farr[1] = (**cell).value;
-                    arr[i] = Value::Array(farr);
+                    arr[c] = Value::Array(farr);
+                    c += 1;
                     vm.gc().write_barrier(*arr);
                     cell.set(cell.next);
                 }
@@ -125,6 +137,30 @@ pub extern "C" fn builtin_ofields(vm: &mut VM, obj: &Value) -> Value {
             Value::Array(*arr)
         }
         _ => vm.throw_str("ofields expects object"),
+    }*/
+    if let Some(mut object) = obj.downcast_ref::<Obj>() {
+        gc_frame!(vm.gc().roots() => object: Gc<Obj>);
+        let mut arr = vm.gc().array(object.table.count, Value::Null);
+
+        gc_frame!(vm.gc().roots() => arr: Gc<Array<Value>>);
+        let mut c = 0;
+        for i in 0..object.table.cells.len() {
+            let mut cell = object.table.cells[i];
+            gc_frame!(vm.gc().roots() => cell: Nullable<Cell>);
+            while cell.is_not_null() {
+                let mut farr = vm.gc().array(2, Value::Null);
+                farr[0] = cell.key;
+                farr[1] = (**cell).value;
+                arr[c] = Value::Array(farr);
+                c += 1;
+                vm.gc().write_barrier(*arr);
+                cell.set(cell.next);
+            }
+        }
+
+        Value::Array(*arr)
+    } else {
+        vm.throw_str("ofields expects objects")
     }
 }
 

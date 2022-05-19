@@ -502,6 +502,20 @@ impl Compiler<'_, '_> {
                 self.ctx.goto(start as _);
                 jend(self.ctx);
             }
+            Expr::Try(try_, var, catch) => {
+                let trap = self.ctx.trap();
+                self.ctx.traps.push(self.ctx.stack);
+                self.expr(try_, false)?;
+                self.ctx.write(Op::EndTrap);
+                self.ctx.traps.pop().unwrap();
+                let jend = self.ctx.jmp();
+                trap(self.ctx);
+                self.ctx.enter_scope();
+                self.ctx.add_var(var, true);
+                self.expr(catch, tail)?;
+                self.ctx.leave_scope();
+                jend(self.ctx);
+            }
             _ => todo!(),
         }
 
@@ -710,6 +724,7 @@ pub fn compile(opts: CompileOpts, src: &mut String) -> CompileResult<()> {
         };
 
         for expr in ast.iter() {
+            println!("cc: {}", expr);
             match cc.expr(expr, false) {
                 Ok(_) => (),
                 Err(e) => {

@@ -28,7 +28,18 @@ pub mod value;
 pub mod vm;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CellType {
+    Null,
+    Int,
+    Float,
     Abstract,
+    Object,
+    Array,
+    Bool,
+    Str,
+    Table,
+    Module,
+    Function,
+    Symbol,
 }
 
 pub fn foo(gc: &mut GCWrapper, init: i32) -> Gc<i32> {

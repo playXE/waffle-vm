@@ -579,7 +579,7 @@ pub fn make_module(vm: &mut VM, globals: &[Rc<Global>], ops: &[Op]) -> Gc<Module
         for (i, g) in globals.iter().enumerate() {
             match &**g {
                 Global::Float(x) => m.globals[i] = Value::Float(f64::from_bits(*x)),
-                Global::Int(x) => m.globals[i] = Value::Int(*x),
+                Global::Int(x) => m.globals[i] = Value::Int(*x as i32),
                 Global::Str(x) => {
                     m.globals[i] = Value::Str(vm.gc().str(x));
                     vm.gc().write_barrier(m.get());
@@ -595,6 +595,7 @@ pub fn make_module(vm: &mut VM, globals: &[Rc<Global>], ops: &[Op]) -> Gc<Module
                         addr: *addr as _,
                         module: m.get().nullable(),
                         env: Nullable::NULL,
+                        prim: false,
                     });
 
                     m.globals[i] = Value::Function(func);
