@@ -15,6 +15,7 @@ pub struct PreciseAllocation {
     /// Is alignment adjusted?
     //pub is_newly_allocated: bool,
     pub adjusted_alignment: bool,
+    pub mature: bool,
     /// Is this even valid allocation?
     pub has_valid_cell: bool,
     pub is_newly_allocated: bool,
@@ -76,7 +77,9 @@ impl PreciseAllocation {
     pub fn contains(&self, raw_ptr: *mut ()) -> bool {
         self.above_lower_bound(raw_ptr) && self.below_upper_bound(raw_ptr)
     }
-
+    pub fn make_mature(&mut self) {
+        self.mature = true;
+    }
     /// Finalize cell if this allocation is not marked.
     pub fn sweep(&mut self) -> bool {
         true
@@ -100,6 +103,7 @@ impl PreciseAllocation {
 
                 //is_newly_allocated: true,
                 has_valid_cell: true,
+                mature: false,
                 cell_size: size,
                 index_in_space,
                 is_newly_allocated: false,

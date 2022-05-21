@@ -8,6 +8,8 @@ pub mod minimark;
 pub mod minimarkpage;
 pub mod roots;
 pub mod roots_v2;
+//pub mod simple;
+pub mod rose;
 #[macro_use]
 pub mod support;
 pub mod gen;

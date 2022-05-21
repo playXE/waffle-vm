@@ -54,7 +54,7 @@ static IDS: &'static [&'static str] = &["loader", "exports", "cache", "path", "l
 unsafe impl Trace for VM {
     fn trace(&mut self, vis: &mut dyn Visitor) {
         unsafe {
-            let mut cursor = self.sp;
+            /*let mut cursor = self.sp;
             let end = self.spmax;
 
             while cursor < end {
@@ -62,9 +62,21 @@ unsafe impl Trace for VM {
                 cursor = cursor.add(1);
             }
 
-            let mut cursor = self.spmin;
+            /*let mut cursor = self.spmin.sub(1);
             let end = self.csp;
 
+            while cursor < end {
+                (&mut *cursor).trace(vis);
+                cursor = cursor.add(1);
+            }*/
+            let cspup = self.csp;
+            let mut csp = self.spmin.sub(1);
+            while csp != cspup {
+                (*csp).trace(vis);
+                csp = csp.add(1);
+            }*/
+            let mut cursor = self.spmin;
+            let end = self.spmax;
             while cursor < end {
                 (&mut *cursor).trace(vis);
                 cursor = cursor.add(1);
@@ -141,7 +153,9 @@ impl VM {
 
         unsafe {
             let mem = libc::malloc(stack_size * size_of::<Value>()).cast::<Value>();
-            core::ptr::copy_nonoverlapping(&Value::Null, mem, stack_size);
+            for i in 0..stack_size {
+                mem.add(i).write(Value::Null);
+            }
             this.spmin = mem;
             this.spmax = mem.add(stack_size);
             this.sp = this.spmax;
@@ -227,7 +241,7 @@ impl VM {
                     }
 
                     trap = self.spmax.cast::<u8>().sub(self.trap as _).cast::<Value>();
-                    println!("{:p} {:p} {}", trap, self.sp, self.trap);
+                    //   println!("{:p} {:p} {}", trap, self.sp, self.trap);
                     if trap < self.sp {
                         // trap outside stack
                         self.trap = 0;
@@ -259,7 +273,7 @@ impl VM {
                         self.sp.write(Value::Null);
                         self.sp = self.sp.add(1);
                     }
-                    println!("trap sp {:p} {:p}", sp, self.sp);
+                    // println!("trap sp {:p} {:p}", sp, self.sp);
                 }
                 Err(x) => panic::resume_unwind(x),
             }
@@ -623,7 +637,10 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
 
     macro_rules! pop_infos {
         ($restpc: expr) => {{
-            m.set(csp.read().module());
+            /*m.set(csp.read().module());*/
+            let m_ = csp.read().module();
+            // println!("ASSIGN {:p} to {:p} ({:p})", m_, m, *m);
+            m.set(m_);
             csp.write(Value::Null);
             csp = csp.sub(1);
             vm.vthis = csp.read();
@@ -717,7 +734,11 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
             save!();
         };
     }
-
+    macro_rules! stack_valid {
+        () => {
+            debug_assert!(sp <= vm.spmax && sp > vm.csp && sp >= vm.spmin);
+        };
+    }
     macro_rules! restore_after_call {
         () => {
             restore!();
@@ -726,6 +747,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
     }
     macro_rules! do_call {
         ($cur_this: expr,$nargs: expr) => {
+            //    println!("CALL {} {}", acc.get(), $nargs);
             match acc.get() {
                 x if x.is_function() => {
                     let func = x.prim_or_func();
@@ -782,10 +804,20 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
     }
     loop {
         unsafe {
+            //    println!("MODULE PTR {:p} {:p}", m.get(), m);
             let op = m.get()[ip];
             let op = std::mem::transmute::<_, Op>(op);
-            //println!("{}: {:?}", ip, op);
+            /*  println!(
+                "({} ({:p}) {:p} {:p}) {}: {:?}",
+                m.name,
+                m.name,
+                m.as_gc(),
+                m,
+                ip,
+                op
+            );*/
             ip += 1;
+            stack_valid!();
             match op {
                 AccNull => {
                     acc.set(Value::Null);
@@ -961,29 +993,6 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                     sp = sp.add(1);
                 }
                 SetIndex(k) => {
-                    /*match &mut *sp {
-                        Value::Array(arr) => {
-                            if ix >= 0 && ix < arr.len() as i32 {
-                                arr[ix as usize] = acc.get();
-                                vm.gc().write_barrier(*arr);
-                            }
-                        }
-                        Value::Object(obj) => {
-                            let string = vm.gc().str("__set");
-                            let mut f = obj.field(vm, &Value::Str(string));
-                            if matches!(f, Value::Null) {
-                                vm.throw_str("unsupported operation");
-                            }
-                            let mut args = [Value::Int(ix as _), acc.get()];
-                            gc_frame!(vm.gc().roots() => f: Value,args: [Value;2]);
-                            push_infos!();
-                            save!();
-                            vm.callex(sp.read(), f.get(), args.as_ref(), &mut None);
-                            restore!();
-                            pop_infos!(false);
-                        }
-                        _ => vm.throw_str("Invalid array access"),
-                    }*/
                     if (*sp).is_array() {
                         let mut arr = sp.read().array();
                         if k < arr.len() as i32 && k >= 0 {
@@ -1014,9 +1023,6 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                 }
 
                 SetEnv(ix) => {
-                    /*vm.env.array()[ix as usize] = acc.get();
-                    let arr = vm.env.array();
-                    vm.gc().write_barrier(arr);*/
                     let mut upval = vm.env[ix as usize];
                     if upval.closed {
                         upval.state.local = acc.get();
@@ -1102,7 +1108,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                     });
                     sp.add(5).write(Value::Int(vm.trap as _));
                     vm.trap = vm.spmax as isize - sp as isize;
-                    println!("SET TRAP {:x} {:p}", vm.trap, sp);
+                    //       println!("SET TRAP {:x} {:p}", vm.trap, sp);
                 }
                 EndTrap => {
                     vm.trap = sp.add(5).read().int() as _;
@@ -1170,6 +1176,8 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                 }
 
                 MakeArray(mut n) => {
+                    // std::env::set_var("WAFFLE_GC_VERBOSE", "1");
+                    //  println!("MODULE {:p} at {:p}", m.as_gc(), m);
                     let mut arr = vm.gc().array(n as usize + 1, Value::Null);
                     while n != 0 {
                         arr[n as usize] = sp.read();
@@ -1179,6 +1187,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                     }
                     arr[0] = acc.get();
                     vm.gc().write_barrier(arr);
+                    //  std::env::set_var("WAFFLE_GC_VERBOSE", "0");
                     acc.set(Value::Array(arr));
                 }
 
@@ -1415,8 +1424,9 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                 JumpTable(_) => todo!(),
 
                 Leave | Last => break,
-                x => todo!("{:?}", x),
+                _ => todo!("{:p} {}", *m, m.name),
             }
+            stack_valid!();
         }
     }
 

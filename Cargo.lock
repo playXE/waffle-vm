@@ -303,6 +303,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "memx"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d834254fe7334e4bc3a27f93e812987ae7ebd1fd1e96269ac763b5784ec9601f"
+dependencies = [
+ "rustc_version",
+]
+
+[[package]]
 name = "os_str_bytes"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -495,6 +504,7 @@ dependencies = [
  "libmimalloc-sys",
  "memmap2",
  "memoffset",
+ "memx",
  "rand",
  "sys-info",
 ]

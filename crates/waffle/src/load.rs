@@ -21,12 +21,13 @@ pub fn read_module(vm: &mut VM, ops: &[Op], globals: &[Rc<Global>], loader: Valu
         let module = vm
             .gc()
             .malloc_varsize::<Module>(ops.len() + 1, &mut [&mut arr]);
+        println!("MODULE CREATE {:p}", module);
         module.as_mut_ptr().write(Module {
             name: Value::Null,
             globals: arr.nullable(),
             exports: Value::Null,
             loader,
-            code_size: ops.len(),
+            code_size: ops.len() + 1,
             code: [],
         });
 
@@ -147,7 +148,9 @@ pub extern "C" fn load_module(vm: &mut VM, mname: &Value, vthis: &Value) -> Valu
         let code = open_module(&*path, &format!("{}", mname))
             .unwrap_or_else(|err| vm.throw_str(format!("failed to open module: {}", err)));
         let (ops, globals) = crate::bytecode::read_module(&code);
+
         let mut m = read_module(vm, &ops, &globals, *vthis);
+        m.name = mid;
         let mut mv = Value::encode_object_value(m);
         gc_frame!(vm.gc().roots() => m: Gc<Module>, mv:Value, mid:Value);
         cache.set_field(vm, &mid, &mv);

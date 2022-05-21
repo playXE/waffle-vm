@@ -1,6 +1,15 @@
 let core = import std.core;
+let treeNode left right = {
+    let obj = [left,right];
 
-let r = 
-    let rec fact n = if n <= 1 then 1 else fact (n - 1) * n in fact(5);
-core.print r;
-core.print(core.typeOf r);
+    obj
+};
+
+let rec bottomUpTree depth = {
+    if depth > 0 then {
+        treeNode(bottomUpTree(depth-1), bottomUpTree(depth-1))
+    }
+    else    
+        treeNode(null,null);
+};
+bottomUpTree(19)

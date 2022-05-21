@@ -411,6 +411,7 @@ impl<T: Object + ?Sized> Gc<T> {
     }
 }
 
+#[repr(transparent)]
 pub struct Nullable<T: Object + ?Sized> {
     ptr: *mut HeapObjectHeader,
     marker: PhantomData<*mut T>,
@@ -493,6 +494,11 @@ impl<T: Object> DerefMut for Nullable<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         assert!(!self.ptr.is_null(), "trying to read null reference");
         unsafe { &mut *self.ptr.add(1).cast::<T>() }
+    }
+}
+impl<T: Object> std::fmt::Pointer for Nullable<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:p}", self.ptr)
     }
 }
 

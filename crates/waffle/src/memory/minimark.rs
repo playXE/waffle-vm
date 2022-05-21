@@ -71,6 +71,7 @@ pub struct MiniMark {
     tmpstack: VecDeque<*mut HeapObjectHeader>,
     finalize_lock: bool,
     max_heap_size_already_raised: bool,
+    gcount: usize,
 }
 
 pub const NURSERY_SIZE: usize = 1024 * 1024;
@@ -97,6 +98,7 @@ impl MiniMark {
     ) -> Box<Self> {
         let nonlarge_max = large_object - 1;
         let newsize = read_uint_from_env("WAFFLE_GC_NURSERY");
+        //  println!("WAFFLE_GC_NURSERY: {:?}", newsize);
         let newsize = match newsize {
             Some(x) => x,
             _ => NURSERY_SIZE,
@@ -161,6 +163,7 @@ impl MiniMark {
             next_major_collection_initial: 0,
             next_major_collection_threshold: 0,
             old_weakrefs: SegmentedVec::new(),
+            gcount: 0,
 
             probably_young_objects_with_finalizers: SegmentedVec::new(),
             objects_to_trace: SegmentedVec::new(),
@@ -281,8 +284,11 @@ impl MiniMark {
             totalsize = size_of::<HeapObjectHeader>() + self.get_size(obj);
 
             newhdr = self.malloc_out_of_nursery(totalsize) as *mut HeapObjectHeader;
+        //    println!("copy {:p}->{:p} ({:p})", obj, newhdr, root);
         } else if self.is_forwarded(obj) {
             *root = NonNull::new_unchecked((*obj).tid().as_word as _);
+
+            // println!("update {:p}->{:p} ({:p})", obj, *root, root);
             return;
         } else {
             let newobj = self
@@ -293,11 +299,13 @@ impl MiniMark {
             newhdr = newobj as *mut HeapObjectHeader;
             (*obj).set_has_shadow(false);
             totalsize = size_of::<HeapObjectHeader>() + self.get_size(obj);
+            //  println!("shadow {:p}->{:p} ({:p})", obj, newhdr, root);
         }
 
         core::ptr::copy_nonoverlapping(obj.cast::<u8>(), newhdr.cast::<u8>(), totalsize);
 
-        *root = NonNull::new_unchecked(newhdr);
+        (root as *mut NonNull<HeapObjectHeader>).write(NonNull::new_unchecked(newhdr));
+
         (*obj).set_tid(Tid {
             as_word: newhdr as Word,
         });
@@ -306,9 +314,10 @@ impl MiniMark {
 
         self.old_objects_pointing_to_young.push(newhdr);
     }
-
+    #[inline(never)]
     pub unsafe fn collect_roots_in_nursery(&mut self, safestack: &mut [&mut dyn Trace]) {
         visit_roots(self.roots.get().read(), |root, meta| {
+            //   println!("root {:p}->{:p}", root, *root);
             if meta.is_null() {
                 self.trace_drag_out(&mut *root.cast::<NonNull<HeapObjectHeader>>(), null_mut());
             } else {
@@ -394,11 +403,12 @@ impl MiniMark {
         unsafe {
             let verbose = read_uint_from_env("WAFFLE_GC_VERBOSE").unwrap_or_else(|| 0);
             let time = if verbose > 0 {
-                eprintln!("gc-minor: start");
+                eprintln!("gc-minor({}): start", self.gcount);
                 Some(std::time::Instant::now())
             } else {
                 None
             };
+            self.gcount += 1;
             self.los.prepare_for_marking(true);
             self.los.begin_marking(false);
 
@@ -445,11 +455,12 @@ impl MiniMark {
     ) {
         let verbose = read_uint_from_env("WAFFLE_GC_VERBOSE").unwrap_or_else(|| 0);
         let time = if verbose > 0 {
-            eprintln!("gc-major: start");
+            eprintln!("gc-major({}): start", self.gcount);
             Some(std::time::Instant::now())
         } else {
             None
         };
+        self.gcount += 1;
         self.objects_to_trace.clear();
         self.los.prepare_for_marking(false);
         self.los.begin_marking(true);
@@ -613,7 +624,7 @@ impl MiniMark {
         marked.clear();
         self.old_objects_with_finalizers = new_with_finalizers;
     }
-
+    #[inline(never)]
     pub unsafe fn collect_roots(&mut self, safestack: &mut [&mut dyn Trace]) {
         visit_roots(*self.roots.get(), |root, meta| {
             if meta.is_null() {
@@ -653,7 +664,6 @@ impl MiniMark {
 
     pub unsafe fn visit_all_objects(&mut self) {
         while let Some(obj) = self.objects_to_trace.pop() {
-            debug_assert!(!self.is_young(obj as _));
             self.visit(obj);
         }
     }
@@ -664,7 +674,15 @@ impl MiniMark {
         }
 
         (*obj).set_visited(true);
-
+        debug_assert!(
+            !self.is_young(obj as _),
+            "found young pointer while tracing old objects: {:p} (nursery {:p}->{:p}, is_precise: {} {})",
+            obj,
+            self.nursery_map.as_mut_ptr(),
+            self.nursery_top,
+            PreciseAllocation::is_precise(obj as _),
+            !(*obj).is_visited()
+        );
         let tid = (*obj).tid();
         (tid.as_vtable.trace)(
             obj.add(1).cast(),
@@ -832,7 +850,7 @@ impl MiniMark {
                 .cast::<usize>()
                 .write(length);
         }
-
+        //     println!("malloc {:p} {}", result, totalsize);
         result
     }
     #[inline]
@@ -874,7 +892,7 @@ impl MiniMark {
         if A::HAS_WEAKPTR {
             self.young_weakrefs.push(obj);
         }
-
+        //     println!("malloc-young {:p} {}", obj, totalsize);
         obj
     }
 
@@ -917,6 +935,7 @@ impl MiniMark {
             p.add(A::VARSIZE_OFFSETOF_LENGTH)
                 .cast::<usize>()
                 .write(length);
+            //      println!("malloc-young {:p} {}", obj, totalsize);
             obj
         };
 
@@ -979,7 +998,7 @@ impl MiniMark {
         (*obj).set_has_shadow(true);
         self.nursery_object_shadows
             .insert(obj as usize, shadowhdr as usize);
-
+        //    println!("allocate shadow {:p}->{:p}", obj, shadowhdr);
         shadowhdr
     }
     /// Returns object identity. It is guaranteed to be the same for the same object even if invoked multiple times.
@@ -1017,7 +1036,7 @@ fn read_float_and_factor_from_env(var: &str) -> Option<(f64, usize)> {
                     factor = 1024 * 1024 * 1024;
                 } else if value.as_bytes()[at] == 'm' as u8 || value.as_bytes()[at] == 'M' as u8 {
                     factor = 1024 * 1024;
-                } else if value.as_bytes()[at] == 'm' as u8 || value.as_bytes()[at] == 'M' as u8 {
+                } else if value.as_bytes()[at] == 'k' as u8 || value.as_bytes()[at] == 'K' as u8 {
                     factor = 1024;
                 } else {
                     realvalue = value;

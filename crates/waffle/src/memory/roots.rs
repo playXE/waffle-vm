@@ -236,3 +236,9 @@ impl<T: Trace> DerefMut for Rooted<T> {
         self.as_mut()
     }
 }
+
+impl<T: Trace> std::fmt::Pointer for Rooted<T> {
+    fn fmt(&self, f: &mut std_::fmt::Formatter<'_>) -> std_::fmt::Result {
+        write!(f, "Rooted({:p})", self.value)
+    }
+}

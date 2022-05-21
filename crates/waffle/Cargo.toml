@@ -20,3 +20,6 @@ indexmap = "1.0"
 memoffset = { version = "0.6", features = ["unstable_const"] }
 lexpr = '0.2'
 byteorder = "1.4"
+memx = "0.1"
+[lib]
+crate-type = ["dylib", "rlib"]

@@ -144,9 +144,24 @@ impl Value {
         self.downcast_ref().unwrap()
     }
     pub fn module(self) -> Nullable<Module> {
-        self.downcast_ref::<Module>()
-            .map(|x| x.nullable())
-            .unwrap_or(Nullable::NULL)
+        /*self.downcast_ref::<Module>()
+        .map(|x| x.nullable())
+        .unwrap_or(Nullable::NULL)*/
+        if self.is_null() {
+            Nullable::NULL
+        } else if let Some(m) = self.downcast_ref::<Module>() {
+            m.nullable()
+        } else {
+            if self.is_object() {
+                panic!("not an module: {:p} {}", self.get_object(), unsafe {
+                    self.get_object().header.as_ref().tid().as_vtable.type_name
+                });
+            } else {
+                unsafe {
+                    panic!("not an module: {:x}", self.0.as_int64);
+                }
+            }
+        }
     }
 
     pub fn prim_or_func(self) -> Gc<Function> {
@@ -242,6 +257,7 @@ unsafe impl Allocation for Module {
 }
 unsafe impl Trace for Module {
     fn trace(&mut self, vis: &mut dyn Visitor) {
+        self.name.trace(vis);
         self.globals.trace(vis);
         self.exports.trace(vis);
         self.loader.trace(vis);
@@ -750,7 +766,11 @@ impl fmt::Display for Value {
         } else if let Some(x) = self.downcast_ref::<Sym>() {
             write!(f, "\"{}\"", &**x.name)
         } else if let Some(x) = self.downcast_ref::<Function>() {
-            write!(f, "<function {:p}>", x)
+            if x.prim {
+                write!(f, "<primitive {:p}>", x)
+            } else {
+                write!(f, "<function {:p}>", x)
+            }
         } else if let Some(x) = self.downcast_ref::<Obj>() {
             write!(f, "<object {:p}>", x)
         } else if let Some(x) = self.downcast_ref::<Array<Value>>() {
@@ -790,7 +810,11 @@ impl fmt::Debug for Value {
         } else if let Some(x) = self.downcast_ref::<Sym>() {
             write!(f, "\"{}\"", &**x.name)
         } else if let Some(x) = self.downcast_ref::<Function>() {
-            write!(f, "<function {:p}>", x)
+            if x.prim {
+                write!(f, "<primitive {:p}>", x)
+            } else {
+                write!(f, "<function {:p}>", x)
+            }
         } else if let Some(x) = self.downcast_ref::<Obj>() {
             write!(f, "<object {:p}>", x)
         } else if let Some(x) = self.downcast_ref::<Array<Value>>() {
@@ -812,6 +836,12 @@ pub mod nanbox {
     #[derive(Copy, Clone)]
     #[repr(C)]
     pub struct Value(pub(crate) EncodedValueDescriptor);
+
+    impl std::fmt::Pointer for Value {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            unsafe { write!(f, "Value(0x{:x})", self.0.as_int64) }
+        }
+    }
     #[derive(Clone, Copy)]
     #[repr(C)]
     pub(crate) union EncodedValueDescriptor {
