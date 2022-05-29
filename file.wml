@@ -1,15 +1,5 @@
+let fs = import std.fs; 
 let core = import std.core;
-let treeNode left right = {
-    let obj = [left,right];
 
-    obj
-};
-
-let rec bottomUpTree depth = {
-    if depth > 0 then {
-        treeNode(bottomUpTree(depth-1), bottomUpTree(depth-1))
-    }
-    else    
-        treeNode(null,null);
-};
-bottomUpTree(19)
+let file = fs.open "file.wml" fs.RO in 
+    core.print core.bstr (fs.read_to_end file)

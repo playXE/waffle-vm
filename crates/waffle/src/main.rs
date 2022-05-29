@@ -24,6 +24,7 @@ fn main() -> Result<(), String> {
     let cli = Cli::parse();
     match cli {
         Cli::Run { file: fname } => {
+            let start = std::time::Instant::now();
             let mut vm = VM::new(None);
 
             let mut mload = waffle_default_loader(&mut vm);
@@ -35,7 +36,6 @@ fn main() -> Result<(), String> {
 
             let key = Value::Symbol(vm.intern("loadmodule"));
             let f = mload.field(vm, &key);
-
             let mut exc = None;
             let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 unsafe {
@@ -53,6 +53,10 @@ fn main() -> Result<(), String> {
                 }
                 Err(e) => std::panic::resume_unwind(e),
             }
+            println!(
+                "runtime: {:.4}ms",
+                start.elapsed().as_micros() as f64 / 1000.0
+            );
         }
         Cli::Link { modules, output } => {
             let (globals, ops) = waffle::linker::link(&modules).map_err(|err| err.to_string())?;

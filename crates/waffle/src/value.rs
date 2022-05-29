@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{
     hash::{Hash, Hasher},
-    ops::{Index, IndexMut},
+    ops::{Deref, DerefMut, Index, IndexMut},
 };
 
 use fxhash::FxHasher64;
@@ -1297,5 +1297,49 @@ pub mod purenan {
             return pure_nan();
         }
         value
+    }
+}
+
+#[repr(C)]
+pub struct ByteBuffer {
+    pub(crate) len: usize,
+    pub(crate) data: [u8; 0],
+}
+
+unsafe impl Trace for ByteBuffer {}
+unsafe impl Finalize for ByteBuffer {}
+unsafe impl Allocation for ByteBuffer {
+    const VARSIZE: bool = true;
+    const VARSIZE_OFFSETOF_LENGTH: usize = offset_of!(Self, len);
+    const VARSIZE_OFFSETOF_VARPART: usize = offset_of!(Self, data);
+}
+
+impl Object for ByteBuffer {}
+
+impl Index<usize> for ByteBuffer {
+    type Output = u8;
+    fn index(&self, index: usize) -> &Self::Output {
+        assert!(index < self.len);
+        unsafe { &*self.data.as_ptr().add(index as _) }
+    }
+}
+
+impl IndexMut<usize> for ByteBuffer {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        assert!(index < self.len);
+        unsafe { &mut *self.data.as_mut_ptr().add(index as _) }
+    }
+}
+
+impl Deref for ByteBuffer {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        unsafe { std::slice::from_raw_parts(self.data.as_ptr(), self.len) }
+    }
+}
+
+impl DerefMut for ByteBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { std::slice::from_raw_parts_mut(self.data.as_mut_ptr(), self.len) }
     }
 }

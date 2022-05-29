@@ -1,12 +1,14 @@
 use crate::{
     gc_frame,
     memory::{
-        gcwrapper::{Array, GCWrapper, Gc, Nullable},
+        gcwrapper::{Array, GCWrapper, Gc, Nullable, Str},
         minimark::read_uint_from_env,
         Allocation, Finalize, Object, Trace, Visitor,
     },
     opcode::Op,
-    value::{value_cmp, value_hash, Function, Module, Obj, Sym, Upvalue, Value, INVALID_CMP},
+    value::{
+        value_cmp, value_hash, ByteBuffer, Function, Module, Obj, Sym, Upvalue, Value, INVALID_CMP,
+    },
 };
 use std::{
     hash::{Hash, Hasher},
@@ -126,6 +128,41 @@ impl VM {
         self.symtab[pos] = Some(sym);
 
         sym
+    }
+
+    pub fn expect_str(&mut self, val: &Value) -> Gc<Str> {
+        if let Some(str) = val.downcast_ref::<Str>() {
+            return str;
+        }
+        self.throw_str("string expected")
+    }
+
+    pub fn expect_int(&mut self, val: &Value) -> i32 {
+        if val.is_int32() {
+            return val.get_int32();
+        }
+        self.throw_str("integer expected")
+    }
+
+    pub fn expect_float(&mut self, val: &Value) -> f64 {
+        if val.is_double() {
+            return val.get_double();
+        }
+        self.throw_str("float expected")
+    }
+
+    pub fn expect_bytebuffer(&mut self, val: &Value) -> Gc<ByteBuffer> {
+        if let Some(buf) = val.downcast_ref::<ByteBuffer>() {
+            return buf;
+        }
+        self.throw_str("bytebuffer expected")
+    }
+
+    pub fn expect<T: 'static + Object, F: AsRef<str>>(&mut self, val: &Value, msg: F) -> Gc<T> {
+        if let Some(obj) = val.downcast_ref::<T>() {
+            return obj;
+        }
+        self.throw_str(msg)
     }
 
     pub fn new(stack_size: Option<usize>) -> &'static mut VM {
@@ -375,15 +412,9 @@ impl VM {
             let result = panic::catch_unwind(AssertUnwindSafe(|| match f.get() {
                 x if x.is_function() => {
                     let x = x.prim_or_func();
+                    check_arguments(self, args.len() as _, x.nargs as _, x.varsize);
                     if x.prim {
                         self.env = x.env;
-                        if args.len() as u32 != x.nargs && !x.varsize {
-                            self.throw_str(&format!(
-                                "argument count does not match: {} != {}",
-                                args.len(),
-                                x.nargs
-                            ));
-                        }
                         ret = dispatch_func2(
                             self,
                             args.as_ptr() as _,
@@ -392,37 +423,34 @@ impl VM {
                             x.varsize,
                         )
                     } else {
-                        if args.len() == x.nargs as usize {
-                            if self.csp.add(4) >= self.sp.sub(args.len()) {
-                                if exc.is_some() {
-                                    self.process_trap();
-                                }
-                                self.throw_str("stack overflow");
+                        if self.csp.add(4) >= self.sp.sub(args.len()) {
+                            if let Some(_) = exc {
+                                self.process_trap();
                             }
-                        } else {
-                            for i in 0..args.len() {
-                                self.sp = self.sp.sub(1);
-                                self.sp.write(args[i]);
-                            }
-
-                            self.env = x.env;
-
-                            self.csp = self.csp.add(1);
-                            self.csp.write(Value::Function(self.callback_ret.as_gc()));
-
-                            self.csp = self.csp.add(1);
-                            self.csp.write(Value::Int(0));
-                            self.csp = self.csp.add(1);
-                            self.csp.write(Value::Int(0));
-                            self.csp = self.csp.add(1);
-                            self.csp
-                                .write(Value::encode_object_value(self.callback_mod.as_gc()));
-
-                            ret = self.interp(x.module, Value::Null, x.addr);
+                            self.throw_str("Stack Overflow");
                         }
+                        for i in 0..args.len() {
+                            self.sp = self.sp.sub(1);
+                            self.sp.write(args[i]);
+                        }
+
+                        self.env = x.env;
+
+                        self.csp = self.csp.add(1);
+                        self.csp.write(Value::Function(self.callback_ret.as_gc()));
+
+                        self.csp = self.csp.add(1);
+                        self.csp.write(Value::Int(0));
+                        self.csp = self.csp.add(1);
+                        self.csp.write(Value::Int(0));
+                        self.csp = self.csp.add(1);
+                        self.csp
+                            .write(Value::encode_object_value(self.callback_mod.as_gc()));
+
+                        ret = self.interp(x.module, Value::Null, x.addr);
                     }
                 }
-                _ => self.throw_str("invalid call"),
+                x => panic!("{}", x), //self.throw_str(format!("invalid call {}",x)),
             }));
 
             match result {
@@ -530,7 +558,7 @@ unsafe fn dispatch_func(
     varsize: bool,
 ) -> Value {
     if varsize {
-        let f = transmute::<_, fn(&mut VM, &[Value]) -> Value>(f);
+        let f = transmute::<_, extern "C" fn(&mut VM, &Gc<Array<Value>>) -> Value>(f);
         let mut args = vm.gc().array(nargs as _, Value::Null);
         let mut i = nargs as usize;
         sp = sp.add(nargs as _);
@@ -581,7 +609,7 @@ unsafe fn dispatch_func2(
     varsize: bool,
 ) -> Value {
     if varsize {
-        let f = transmute::<_, fn(&mut VM, &[Value]) -> Value>(f);
+        let f = transmute::<_, extern "C" fn(&mut VM, &Gc<Array<Value>>) -> Value>(f);
         let mut args = vm.gc().array(nargs as _, Value::Null);
 
         sp = sp.add(nargs as _);
@@ -616,6 +644,20 @@ unsafe fn dispatch_func2(
 
             _ => todo!(),
         }
+    }
+}
+
+fn check_arguments(vm: &mut VM, argc: usize, expected: usize, variable: bool) {
+    if argc < expected && !variable {
+        vm.throw_str(format!(
+            "function expected at least {} arguments but found {}",
+            expected, argc
+        ));
+    } else if argc > expected && !variable {
+        vm.throw_str(format!(
+            "function expected at most {} arguments but found {}",
+            expected, argc
+        ))
     }
 }
 
@@ -751,6 +793,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
             match acc.get() {
                 x if x.is_function() => {
                     let func = x.prim_or_func();
+                    check_arguments(vm, $nargs as _, func.nargs as _, func.varsize);
                     if !func.prim {
                         push_infos!();
                         m.set(func.module);
@@ -761,12 +804,7 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                         acc.set(Value::Int($nargs as _));
                     } else {
                         let prim = func;
-                        if $nargs as u32 != prim.nargs && !prim.varsize {
-                            vm.throw_str(&format!(
-                                "argument count does not match: {} != {}",
-                                $nargs, prim.nargs
-                            ));
-                        }
+
                         setup_before_call!($cur_this);
 
                         acc.set(dispatch_func(vm, sp, prim.addr, $nargs as _, prim.varsize));

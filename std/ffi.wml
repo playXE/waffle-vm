@@ -1,0 +1,23 @@
+let void = 0 
+and pointer = 1
+and double = 2
+and float = 3
+and i8 = 4 
+and i16 = 5 
+and i32 = 6
+and i64 = 7
+and u8 = 8
+and u16 = 9
+and u32 = 10
+and u64 = 11
+and string = 12
+and byte_array = 13
+and size_t = 14
+and open = $ffi_open
+and call = $ffi_call
+and attach = $ffi_attach
+and attach_pointer = $ffi_attach_pointer in 
+    export {
+        void, pointer, double, float, i8, i16, i32, i64, u8, u16, u32, u64, string, byte_array, size_t, open,
+        call, attach, attach_pointer
+    }

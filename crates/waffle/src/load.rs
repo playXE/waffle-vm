@@ -21,7 +21,7 @@ pub fn read_module(vm: &mut VM, ops: &[Op], globals: &[Rc<Global>], loader: Valu
         let module = vm
             .gc()
             .malloc_varsize::<Module>(ops.len() + 1, &mut [&mut arr]);
-        println!("MODULE CREATE {:p}", module);
+
         module.as_mut_ptr().write(Module {
             name: Value::Null,
             globals: arr.nullable(),
@@ -332,6 +332,7 @@ pub fn waffle_default_loader(vm: &mut VM) -> Value {
     let mut s = Value::Symbol(vm.intern("loadmodule"));
     gc_frame!(vm.gc().roots() => f: Value,s: Value);
     loader.set_field(vm, &s, &f);
+    
     let mut f = make_prim(vm, loader_loadprim as _, 2, false);
     let mut s = Value::Symbol(vm.intern("loadprim"));
     gc_frame!(vm.gc().roots() => f: Value,s: Value);

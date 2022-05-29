@@ -10,7 +10,8 @@
     const_refs_to_cell,
     try_trait_v2,
     discriminant_kind,
-    box_patterns
+    box_patterns,
+    cstr_from_bytes_until_nul
 )]
 #![allow(incomplete_features)]
 
@@ -18,6 +19,7 @@ use memory::gcwrapper::{GCWrapper, Gc};
 
 pub mod builtin;
 pub mod bytecode;
+pub mod ffi;
 pub mod linker;
 pub mod load;
 pub mod memory;

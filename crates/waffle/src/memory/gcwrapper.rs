@@ -166,11 +166,13 @@ impl GCWrapper {
     pub fn str(&mut self, str: impl AsRef<str>) -> Gc<Str> {
         unsafe {
             let str = str.as_ref();
-            let uninit = self.malloc_varsize::<Str>(str.len(), &mut []);
+            let uninit = self.malloc_varsize::<Str>(str.len() + 1, &mut []);
             let ptr = uninit.as_mut_ptr();
-            let ptr = (*ptr).data.as_mut_ptr();
-            core::ptr::copy_nonoverlapping(str.as_ptr(), ptr, str.len());
 
+            let ptr = (*ptr).data.as_mut_ptr();
+
+            core::ptr::copy_nonoverlapping(str.as_ptr(), ptr, str.len());
+            ptr.add(str.len()).write(0);
             uninit.assume_init()
         }
     }
@@ -314,14 +316,26 @@ pub struct Str {
     length: usize,
     data: [u8; 0],
 }
+impl Str {
+    pub const fn len(&self) -> usize {
+        self.length - 1
+    }
 
+    pub const fn len_with_null(&self) -> usize {
+        self.length
+    }
+
+    pub fn as_c_str<'a>(&'a self) -> &'a std::ffi::CStr {
+        unsafe { std::ffi::CStr::from_ptr(self.data.as_ptr() as _) }
+    }
+}
 impl Deref for Str {
     type Target = str;
     fn deref(&self) -> &Self::Target {
         unsafe {
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(
                 self.data.as_ptr(),
-                self.length,
+                self.length - 1,
             ))
         }
     }
@@ -581,3 +595,7 @@ unsafe impl<const N: usize, T: Trace> Trace for [T; N] {
 }
 
 unsafe impl Trace for () {}
+
+unsafe impl Trace for std::fs::File {}
+unsafe impl Finalize for std::fs::File {}
+impl Object for std::fs::File {}

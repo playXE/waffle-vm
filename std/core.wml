@@ -13,7 +13,7 @@ let _typeOf = [
     $symbol("object"),
     $symbol("table"), 
     $symbol("symbol"),
-     $symbol("abstract"),
+    $symbol("abstract"),
 ];
 
 let TNull = _typeOf[0];
@@ -64,11 +64,13 @@ let rec toString object = {
 
 
 let print arg = $print(toString(arg))
+let bstr arg = $bstr arg;
 
 export {
     length, 
     typeOf,
     toString,
     print,
+    bstr,
     TNull,TBool,TInt,TFloat,TString,TArray,TAbstract,TModule,TFunction,TPrimitive,TObject,TTable
 }
