@@ -148,6 +148,18 @@ impl<'input> Parser<'input> {
         }
     }
 
+    fn consume_multiple(&mut self, expected: &[TokenKind]) -> ParseResult<Token> {
+        let token = self.next()?;
+        if expected.contains(&token.kind) {
+            Ok(token)
+        } else {
+            Err(SyntaxError::UnexpectedToken {
+                expected: expected[0].to_string(),
+                got: token,
+            })
+        }
+    }
+
     /// Advance without checking anything
     fn advance(&mut self) {
         self.lexer.next().unwrap();
@@ -221,6 +233,7 @@ impl Parser<'_> {
                     _ => self.parse_block(t.span),
                 }
             }
+            TokenKind::Switch => return self.parse_switch(),
             TokenKind::If => {
                 let t = self.next()?;
                 let cond = self.expr()?;
@@ -383,7 +396,7 @@ impl Parser<'_> {
         let cond = self.expr()?;
         self.consume(TokenKind::BraceOpen)?;
         let mut last = cond.span;
-        let cases = self.parse_list(TokenKind::BitOr, TokenKind::BraceClose, |parser| {
+        let cases = self.parse_list(TokenKind::Comma, TokenKind::BraceClose, |parser| {
             let pat = parser.parse_pattern()?;
             let when = if let TokenKind::If = parser.peek() {
                 parser.advance();
@@ -391,7 +404,9 @@ impl Parser<'_> {
             } else {
                 None
             };
-            let then = parser.expr()?;
+            parser.consume(TokenKind::Arrow)?;
+            let then = parser.parse_block_switch(pat.span)?;
+            println!("then {}", then);
             last = then.span;
             Ok((pat, when, then))
         })?;
@@ -565,10 +580,16 @@ impl Parser<'_> {
                 )
             )),
             TokenKind::Str => Ok(spanned!(tok.span, Pattern::Str(self.text(tok).to_string()))),
-            TokenKind::Ident => Ok(spanned!(
-                tok.span,
-                Pattern::Ident(self.text(tok).to_string())
-            )),
+            TokenKind::Ident => {
+                if self.text(tok) == "_" {
+                    Ok(spanned!(tok.span, Pattern::Default))
+                } else {
+                    Ok(spanned!(
+                        tok.span,
+                        Pattern::Ident(self.text(tok).to_string())
+                    ))
+                }
+            }
             TokenKind::True => Ok(spanned!(tok.span, Pattern::Bool(true))),
             TokenKind::False => Ok(spanned!(tok.span, Pattern::Bool(false))),
             TokenKind::Colon => {
@@ -609,6 +630,7 @@ impl Parser<'_> {
 
                 Ok(spanned!(tok.span, Pattern::Record(p)))
             }
+
             _ => {
                 return Err(SyntaxError::UnexpectedToken {
                     expected: format!("pattern"),
@@ -874,6 +896,26 @@ impl Parser<'_> {
         let end = self.consume_next(TokenKind::BraceClose)?;
 
         Ok(spanned!(span.start..end.span.end, Expr::Block(exprs)))
+    }
+
+    fn parse_block_switch(&mut self, span: Span) -> ParseResult<SpanExpr> {
+        let mut exprs = vec![];
+        let mut end = span;
+        while !self.at(TokenKind::Comma) || !self.at(TokenKind::BraceClose) {
+            let e = self.expr()?;
+            println!("{}", e);
+            let sp = e.span;
+            exprs.push(e);
+
+            if self.at(TokenKind::Semicolon) {
+                end = self.next()?.span;
+            } else {
+                end = sp;
+                break;
+            }
+        }
+
+        Ok(spanned!(span.start..end.end, Expr::Block(exprs)))
     }
 
     pub fn parse_program(&mut self) -> ParseResult<Vec<SpanExpr>> {

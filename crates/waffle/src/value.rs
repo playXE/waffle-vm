@@ -14,7 +14,7 @@ use crate::{
         Allocation, Finalize, Object, Trace, Visitor,
     },
     opcode::Op,
-    vm::VM,
+    vm::VM, ffi,
 };
 
 #[cfg(feature = "small-float")]
@@ -100,6 +100,14 @@ impl Value {
             10
         } else if self.is_symbol() {
             11
+        } else if self.downcast_ref::<ByteBuffer>().is_some() {
+            13
+        } else if self.downcast_ref::<ffi::Library>().is_some() {
+            14 
+        } else if self.downcast_ref::<ffi::Function>().is_some() {
+            15 
+        } else if self.downcast_ref::<ffi::Pointer>().is_some() {
+            16
         } else {
             12
         }

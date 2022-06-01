@@ -15,6 +15,7 @@ use crate::ast::Expr;
 use crate::ast::LetDef;
 use crate::ast::Pattern;
 use crate::ast::Span;
+use crate::ast::Spanned;
 use crate::ast::TokenKind;
 
 use crate::parser::SpanExpr;
@@ -27,6 +28,7 @@ pub enum CompileError {
     // either syntax error from importing or other compile error
     ImportFailed(String, Span),
     Syntax(Box<SyntaxError>),
+    Custom(String, Span),
 }
 
 fn select_file(path: &str, is_str: bool) -> Option<String> {
@@ -65,6 +67,12 @@ impl CompileError {
                 Report::build(ariadne::ReportKind::Error, filename, span.start).with_label(
                     ariadne::Label::new((filename.to_string(), (*span).into()))
                         .with_message(format!("import from '{}' failed", path)),
+                )
+            }
+            CompileError::Custom(msg, span) => {
+                Report::build(ariadne::ReportKind::Error, filename, span.start).with_label(
+                    ariadne::Label::new((filename.to_string(), (*span).into()))
+                        .with_message(msg.clone()),
                 )
             }
             CompileError::Syntax(err) => err.report(filename.to_string(), file),
@@ -257,6 +265,7 @@ impl Compiler<'_, '_> {
     }
 
     pub fn expr(&mut self, expr: &SpanExpr, tail: bool) -> CompileResult<()> {
+        let span = expr.span;
         match &expr.node {
             Expr::Import(modules) => {
                 self.import_module(expr.span, modules)?;
@@ -516,9 +525,108 @@ impl Compiler<'_, '_> {
                 self.ctx.leave_scope();
                 jend(self.ctx);
             }
+            Expr::Switch(expr, patterns, _) => {
+                self.expr(expr, tail)?;
+                self.ctx.write(Op::Push);
+
+                let count = patterns
+                    .iter()
+                    .filter(|(pat, when, _)| matches!(pat.node, Pattern::Default) && when.is_none())
+                    .count();
+                if count == 0 {
+                    return Err(CompileError::Custom(
+                        format!("switch statement has no default pattern"),
+                        span,
+                    ));
+                } else if count > 1 {
+                    return Err(CompileError::Custom(
+                        format!("switch statement has more than one default parameters"),
+                        span,
+                    ));
+                }
+
+                let mut jumps = vec![];
+                for (pat, when, then) in patterns.iter() {
+                    self.ctx.write(Op::AccStack(0));
+                    self.ctx.write(Op::Push);
+                    self.pattern(pat)?;
+                    if let Some(when) = when {
+                        self.ctx.write(Op::Push);
+                        self.expr(when, false)?;
+                        self.ctx.write(Op::And);
+                    }
+                    jumps.push((self.ctx.cjmp(true), then));
+                }
+                let jump_end = self.ctx.jmp();
+                let mut njumps = vec![];
+                for (j, e) in jumps {
+                    j(self.ctx);
+                    self.expr(e, tail)?;
+                    njumps.push(self.ctx.jmp());
+                }
+
+                jump_end(self.ctx);
+                for j in njumps {
+                    j(self.ctx);
+                }
+                self.ctx.write(Op::Pop(1));
+            }
             _ => todo!(),
         }
 
+        Ok(())
+    }
+
+    pub fn pattern(&mut self, pat: &Spanned<Pattern>) -> Result<(), CompileError> {
+        match pat.node {
+            Pattern::Bool(x) => {
+                if x {
+                    self.ctx.write(Op::AccTrue)
+                } else {
+                    self.ctx.write(Op::AccFalse)
+                }
+                self.ctx.write(Op::Eq);
+            }
+            Pattern::Int(x) => {
+                self.ctx.write(Op::AccInt(x as _));
+                self.ctx.write(Op::Eq);
+            }
+            Pattern::Float(x) => {
+                let g = self.ctx.global(Rc::new(Global::Float(x.to_bits())));
+                self.ctx.write(Op::AccGlobal(g as _));
+                self.ctx.write(Op::Eq);
+            }
+            Pattern::Str(ref x) => {
+                let g = self
+                    .ctx
+                    .global(Rc::new(Global::Str(x.clone().into_boxed_str())));
+                self.ctx.write(Op::AccGlobal(g as _));
+                self.ctx.write(Op::Eq);
+            }
+            Pattern::Symbol(ref x) => {
+                let g = self
+                    .ctx
+                    .global(Rc::new(Global::Symbol(x.clone().into_boxed_str())));
+                self.ctx.write(Op::AccGlobal(g as _));
+                self.ctx.write(Op::Eq);
+            }
+            Pattern::Array(ref patterns) => {
+                self.ctx.write(Op::AccTrue);
+                self.ctx.write(Op::Push);
+                for (i, pat) in patterns.iter().enumerate() {
+                    self.ctx.write(Op::AccStack(1));
+                    self.ctx.write(Op::AccIndex(i as _));
+                    self.ctx.write(Op::Push);
+                    self.pattern(pat)?;
+                    self.ctx.write(Op::And);
+                }
+            }
+            Pattern::Default => {
+                self.ctx.write(Op::Pop(1));
+                self.ctx.write(Op::AccTrue);
+            }
+            _ => (),
+        }
         Ok(())
     }
 

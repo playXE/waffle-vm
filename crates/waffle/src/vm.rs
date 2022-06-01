@@ -1437,8 +1437,36 @@ fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usi
                 IsNotNull => {
                     acc.set(Value::Bool(!acc.is_null()));
                 }
-                Or => intop!(|),
-                And => intop!(&),
+                Or => {
+                    match (acc.get(), sp.read()) {
+                        (x, y) if x.is_int32() && y.is_int32() => {
+                            acc.set(Value::Int(x.get_int32() | y.get_int32()));
+                        }
+                        (x, y) if x.is_bool() && y.is_bool() => {
+                            acc.set(Value::Bool(x.get_bool() | y.get_bool()));
+                        }
+                        _ => {
+                            vm.throw_str(concat!("incompatible types for '", stringify!($op), "'"))
+                        }
+                    }
+                    sp.write(Value::Null);
+                    sp = sp.add(1);
+                }
+                And => {
+                    match (acc.get(), sp.read()) {
+                        (x, y) if x.is_int32() && y.is_int32() => {
+                            acc.set(Value::Int(x.get_int32() & y.get_int32()));
+                        }
+                        (x, y) if x.is_bool() && y.is_bool() => {
+                            acc.set(Value::Bool(x.get_bool() & y.get_bool()));
+                        }
+                        _ => {
+                            vm.throw_str(concat!("incompatible types for '", stringify!($op), "'"))
+                        }
+                    }
+                    sp.write(Value::Null);
+                    sp = sp.add(1);
+                }
                 Xor => intop!(^),
                 TypeOf => {
                     let tag = acc.tag();
@@ -1527,7 +1555,7 @@ unsafe impl Allocation for LibList {
 }
 impl Object for LibList {}
 
-pub const WAFFLE_TYPEOF: [Value; 13] = [
+pub const WAFFLE_TYPEOF: [Value; 17] = [
     Value::Int(0),
     Value::Int(1),
     Value::Int(2),
@@ -1541,4 +1569,8 @@ pub const WAFFLE_TYPEOF: [Value; 13] = [
     Value::Int(10),
     Value::Int(11),
     Value::Int(12),
+    Value::Int(13),
+    Value::Int(14),
+    Value::Int(15),
+    Value::Int(16),
 ];

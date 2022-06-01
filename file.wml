@@ -1,5 +1,6 @@
-let fs = import std.fs; 
+let fs = import std.fs;
 let core = import std.core;
-
-let file = fs.open "file.wml" fs.RO in 
-    core.print core.bstr (fs.read_to_end file)
+let x = $file_open("file.wml", fs.RO);
+let contents = $file_read_to_end(x);
+core.print contents;
+$minorGC();

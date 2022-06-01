@@ -14,6 +14,10 @@ let _typeOf = [
     $symbol("table"), 
     $symbol("symbol"),
     $symbol("abstract"),
+    $symbol("bytebuffer"),
+    $symbol("ffi_library"),
+    $symbol("ffi_function"),
+    $symbol("ffi_pointer")
 ];
 
 let TNull = _typeOf[0];
@@ -29,6 +33,10 @@ let TObject = _typeOf[9];
 let TTable = _typeOf[10];
 let TSymbol = _typeOf[11];
 let TAbstract = _typeOf[12];
+let TByteBuffer = _typeOf[13];
+let TFFILibrary = _typeOf[14];
+let TFFIFunction = _typeOf[15];
+let TFFIPointer = _typeOf[16];
 let typeOf val = { _typeOf[$typeof(val)] }
 
 let rec toString object = {
@@ -38,9 +46,10 @@ let rec toString object = {
             while i < length object {
                 f = $string_concat(f,toString(object[i]));
                 if i != length(object) - 1 then 
-                    f = $string_concat(f," ");
+                    f = $string_concat(f,",");
                 i = i + 1
             };  
+            f = $string_concat(f,"]");
             f
         }
     else if typeOf object == TObject then 
@@ -58,7 +67,18 @@ let rec toString object = {
             f = $string_concat(f,"}");
             f
         }
-
+    else if typeOf object == TByteBuffer then 
+        let f = "["
+        and i = 0 in {
+            while i < $bsize(object) {
+                f = $string_concat(f, $bget(object, i));
+                if i != $bsize(object) - 1 then 
+                    f = $string_concat(f, ",");
+                i = i + 1
+            };
+            f = $string_concat(f,"]");
+            f
+        }
     else $string(object)
 };
 
@@ -72,5 +92,5 @@ export {
     toString,
     print,
     bstr,
-    TNull,TBool,TInt,TFloat,TString,TArray,TAbstract,TModule,TFunction,TPrimitive,TObject,TTable
+    TNull,TBool,TInt,TFloat,TString,TArray,TAbstract,TModule,TFunction,TPrimitive,TObject,TTable, TByteBuffer,TFFIFunction,TFFILibrary,TFFIPointer
 }

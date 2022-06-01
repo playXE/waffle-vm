@@ -165,8 +165,8 @@ pub enum TokenKind {
     #[display(fmt = "catch")]
     #[token("catch")]
     Catch,
-    #[display(fmt = "switch")]
-    #[token("switch")]
+    #[display(fmt = "match")]
+    #[token("match")]
     Switch,
     #[display(fmt = "then")]
     #[token("then")]
@@ -346,7 +346,7 @@ pub enum Expr {
     #[display(fmt = "(object {})", "tuplea(_0)")]
     Object(Vec<(String, Spanned<Expr>)>),
     Label(String),
-    #[display(fmt = "switch")]
+    #[display(fmt = "match")]
     Switch(
         Box<Spanned<Expr>>,
         Vec<(Spanned<Pattern>, Option<Spanned<Expr>>, Spanned<Expr>)>,
@@ -467,6 +467,8 @@ pub enum Pattern {
     Record(Vec<(String, Option<Spanned<Pattern>>)>),
     #[display(fmt = "[{}]", "join(_0)")]
     Array(Vec<Spanned<Pattern>>),
+
+    Default,
 }
 
 impl<T> TokenData<T> {
