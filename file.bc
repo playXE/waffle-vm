@@ -1,0 +1,70 @@
+cc: class base  = object { val str = Hello!;method display a = (apply $print :args [str]) }
+cc: class parent  = object { inherit base () }
+cc: let p = new parent()
+cc: (call p.display :args [])
+'file.wml' disassembly: 
+globals section: 
+0: Symbol("object")
+1: Symbol("str")
+2: Symbol("print")
+3: Func(1, 1)
+4: Symbol("display")
+5: Str("Hello!")
+6: Func(8, 0)
+7: Symbol("constructor")
+8: Symbol("set_prototype")
+9: Func(13, 0)
+code section: 
+0000: Jump 0016
+0001: AccThis
+0002: AccField Symbol("str")
+0003: Push
+0004: AccBuiltin $2 // Symbol("print")
+0005: TailCall(2, 1)
+0006: Pop 1
+0007: Ret 0
+0008: AccThis
+0009: Push
+0010: AccGlobal 5 // Str("Hello!")
+0011: SetField Symbol("str")
+0012: Ret 0
+0013: AccThis
+0014: Super(0, 0)
+0015: Ret 0
+0016: AccBuiltin $0 // Symbol("object")
+0017: New(0, 0)
+0018: Push
+0019: AccStack 0
+0020: Push
+0021: AccGlobal 3 // Func(1, 1)
+0022: SetField Symbol("display")
+0023: AccStack 0
+0024: Push
+0025: AccGlobal 6 // Func(8, 0)
+0026: SetField Symbol("constructor")
+0027: AccBuiltin $0 // Symbol("object")
+0028: New(0, 0)
+0029: Push
+0030: AccStack 0
+0031: Push
+0032: AccStack 2
+0033: Push
+0034: AccBuiltin $0 // Symbol("object")
+0035: Push
+0036: AccField Symbol("set_prototype")
+0037: ObjCall 2
+0038: AccStack 0
+0039: Push
+0040: AccGlobal 9 // Func(13, 0)
+0041: SetField Symbol("constructor")
+0042: AccNull
+0043: Push
+0044: AccStack 1
+0045: New(0, 0)
+0046: SetStack 0
+0047: AccStack 0
+0048: Push
+0049: AccField Symbol("display")
+0050: ObjCall 0
+0051: Pop 3
+

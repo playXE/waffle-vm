@@ -10,6 +10,8 @@ use clap::Parser;
 use waffle::opcode::*;
 use waffle::reflect::*;
 
+use crate::ast::ClassExpr;
+use crate::ast::ClassField;
 use crate::ast::Export;
 use crate::ast::Expr;
 use crate::ast::LetDef;
@@ -120,12 +122,16 @@ impl Compiler<'_, '_> {
                         Some(Pattern::Ident(real_name)) => {
                             self.ctx.add_var(real_name, false);
                         }
-                        None => self.ctx.add_var(name, false),
+                        None => {
+                            self.ctx.add_var(name, false);
+                        }
                         _ => unreachable!(),
                     }
                 }
             }
-            Pattern::Ident(name) => self.ctx.add_var(name, false),
+            Pattern::Ident(name) => {
+                self.ctx.add_var(name, false);
+            }
             _ => unreachable!(),
         }
     }
@@ -155,12 +161,12 @@ impl Compiler<'_, '_> {
                     match pat {
                         Some(pat) => {
                             self.ctx.write(Op::AccStack(0));
-                            self.ctx.write(Op::AccField(g));
+                            self.ctx.write(Op::AccField(g, 0));
                             self.destructuring_assign(&pat.node);
                         }
                         None => {
                             self.ctx.write(Op::AccStack(0));
-                            self.ctx.write(Op::AccField(g));
+                            self.ctx.write(Op::AccField(g, 0));
                             let a = self.ctx.access_var(field);
                             self.ctx.compile_access_set(&a);
                         }
@@ -260,13 +266,14 @@ impl Compiler<'_, '_> {
         self.ctx.write(Op::Push);
         self.ctx.write(Op::AccBuiltin(loader as _));
         self.ctx.write(Op::Push);
-        self.ctx.write(Op::AccField(loadmodule as _));
+        self.ctx.write(Op::AccField(loadmodule as _, 0));
         self.ctx.write(Op::ObjCall(2));
     }
 
     pub fn expr(&mut self, expr: &SpanExpr, tail: bool) -> CompileResult<()> {
         let span = expr.span;
         match &expr.node {
+            Expr::Class(name, params, body) => self.class(name, params, body)?,
             Expr::Import(modules) => {
                 self.import_module(expr.span, modules)?;
             }
@@ -284,14 +291,14 @@ impl Compiler<'_, '_> {
                             let field = self.ctx.global(Rc::new(Global::Symbol(
                                 export.to_string().into_boxed_str(),
                             )));
-                            self.ctx.write(Op::SetField(field as _));
+                            self.ctx.write(Op::SetField(field as _, 0));
                         }
                         Export::Identifier(ident) => {
                             self.ctx.use_var(ident);
                             let field = self.ctx.global(Rc::new(Global::Symbol(
                                 ident.to_string().into_boxed_str(),
                             )));
-                            self.ctx.write(Op::SetField(field as _));
+                            self.ctx.write(Op::SetField(field as _, 0));
                         }
                     }
                 }
@@ -329,7 +336,7 @@ impl Compiler<'_, '_> {
                 let g = self
                     .ctx
                     .global(Rc::new(Global::Symbol(field.clone().into_boxed_str())));
-                self.ctx.write(Op::AccField(g as _));
+                self.ctx.write(Op::AccField(g as _, 0));
             }
             Expr::Apply(callee, args) => self.call(callee, args, tail)?,
             Expr::Call(callee, args) => self.call(callee, args, tail)?,
@@ -352,7 +359,7 @@ impl Compiler<'_, '_> {
             }
             Expr::Object(fields) => {
                 self.ctx.write(Op::AccNull);
-                self.ctx.write(Op::New);
+                self.ctx.write(Op::New(0, 0));
                 if !fields.is_empty() {
                     self.ctx.write(Op::Push);
                     for (field, expr) in fields.iter() {
@@ -361,7 +368,7 @@ impl Compiler<'_, '_> {
                         let g = self
                             .ctx
                             .global(Rc::new(Global::Symbol(field.clone().into_boxed_str())));
-                        self.ctx.write(Op::SetField(g as _));
+                        self.ctx.write(Op::SetField(g as _, 0));
                         self.ctx.write(Op::AccStack(0));
                     }
                     self.ctx.write(Op::Pop(1));
@@ -369,11 +376,10 @@ impl Compiler<'_, '_> {
             }
             Expr::Let(defs, body, recursive) => {
                 let saved = if body.is_some() {
-                    let locals = self.ctx.locals.clone();
                     let stack = self.ctx.stack;
 
                     self.ctx.enter_scope();
-                    Some((locals, stack))
+                    Some(stack)
                 } else {
                     None
                 };
@@ -438,12 +444,11 @@ impl Compiler<'_, '_> {
 
                 if let Some(body) = body {
                     self.expr(body, tail)?;
-                    let (locals, _stack) = saved.unwrap();
+                    let _stack = saved.unwrap();
                     /*if stack < self.ctx.stack {
                         self.ctx
                             .write(Op::Pop(self.ctx.stack as i32 - stack as i32));
                     }*/
-                    *self.ctx.locals = locals;
 
                     self.ctx.leave_scope();
                 }
@@ -571,6 +576,7 @@ impl Compiler<'_, '_> {
                 }
                 self.ctx.write(Op::Pop(1));
             }
+            Expr::New(callee, args) => self.constructor(callee, args)?,
             _ => todo!(),
         }
 
@@ -630,6 +636,28 @@ impl Compiler<'_, '_> {
         Ok(())
     }
 
+    pub fn constructor(&mut self, callee: &SpanExpr, args: &Vec<SpanExpr>) -> CompileResult<()> {
+        for arg in args.iter() {
+            self.expr(arg, false)?;
+            self.ctx.write(Op::Push);
+        }
+        match callee.node {
+            Expr::Field(ref object, ref method) => {
+                self.expr(&object, false)?;
+                self.ctx.write(Op::Push);
+                let g = self
+                    .ctx
+                    .global(Rc::new(Global::Symbol(method.clone().into_boxed_str())));
+                self.ctx.write(Op::AccField(g as _, 0));
+                self.ctx.write(Op::ObjCall(args.len() as _));
+                return Ok(());
+            }
+            _ => self.expr(callee, false)?,
+        }
+        self.ctx.write(Op::New(args.len() as _, 0));
+        Ok(())
+    }
+
     pub fn call(
         &mut self,
         callee: &SpanExpr,
@@ -647,15 +675,7 @@ impl Compiler<'_, '_> {
                     self.ctx.write(Op::TypeOf);
                     return Ok(());
                 }
-                "$new" => {
-                    if args.len() != 0 {
-                        self.expr(&args[0], false)?;
-                    } else {
-                        self.ctx.write(Op::AccNull);
-                    }
-                    self.ctx.write(Op::New);
-                    return Ok(());
-                }
+
                 _ => (),
             }
         }
@@ -670,7 +690,7 @@ impl Compiler<'_, '_> {
                 let g = self
                     .ctx
                     .global(Rc::new(Global::Symbol(method.clone().into_boxed_str())));
-                self.ctx.write(Op::AccField(g as _));
+                self.ctx.write(Op::AccField(g as _, 0));
                 self.ctx.write(Op::ObjCall(args.len() as _));
                 return Ok(());
             }
@@ -703,6 +723,36 @@ impl Compiler<'_, '_> {
                     Err(e) => err = Some(e),
                 }
 
+                Ok(())
+            })
+            .unwrap();
+
+        if let Some(e) = err {
+            Err(e)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn compile_context<'a, 'b, F: FnOnce(&mut Compiler) -> CompileResult<()>>(
+        &mut self,
+        args: &[Box<str>],
+        closure: F,
+    ) -> CompileResult<()> {
+        let mut err = None;
+
+        self.ctx
+            .compile_function(args, |ctx| {
+                let mut cc = Compiler {
+                    opts: self.opts.clone(),
+                    ctx,
+                    toplevel: false,
+                };
+
+                match closure(&mut cc) {
+                    Ok(_) => (),
+                    Err(e) => err = Some(e),
+                }
                 Ok(())
             })
             .unwrap();
@@ -796,6 +846,123 @@ impl Compiler<'_, '_> {
             Expr::This => Ok(Access::This),
             _ => unreachable!(),
         }
+    }
+
+    pub fn class(
+        &mut self,
+        name: &str,
+        params: &[Box<str>],
+        body: &Spanned<ClassExpr>,
+    ) -> CompileResult<()> {
+        let g = self.ctx.global(Rc::new(Global::Symbol(
+            "object".to_string().into_boxed_str(),
+        )));
+
+        self.ctx.write(Op::AccBuiltin(g as _));
+        self.ctx.write(Op::New(0, 0));
+        let acc = self.ctx.add_var(name, true);
+
+        match body.node {
+            ClassExpr::Object(ref body) => {
+                self.ctx.enter_scope();
+                let mut varset = std::collections::HashMap::new();
+                for field in body.iter() {
+                    match &field.node {
+                        ClassField::Val(name, expr) => {
+                            if varset.insert(name.clone(), expr.clone()).is_some() {
+                                return Err(CompileError::Custom(
+                                    format!("class field '{}' defined twice", name),
+                                    field.span,
+                                ));
+                            }
+                            self.ctx.add_class_field(&name);
+                        }
+                        _ => (),
+                    }
+                }
+
+                let inherit = body
+                    .iter()
+                    .find(|x| matches!(x.node, ClassField::Inherit(_, _)));
+                match inherit.as_ref().map(|x| &x.node) {
+                    Some(ClassField::Inherit(expr, _)) => {
+                        self.ctx.compile_access_get(&acc);
+                        self.ctx.write(Op::Push);
+                        self.expr(expr, false)?;
+                        self.ctx.write(Op::Push);
+
+                        let g = self.ctx.global(Rc::new(Global::Symbol(
+                            "object".to_string().into_boxed_str(),
+                        )));
+                        let g2 = self.ctx.global(Rc::new(Global::Symbol(
+                            "set_prototype".to_string().into_boxed_str(),
+                        )));
+                        self.ctx.write(Op::AccBuiltin(g as _));
+                        self.ctx.write(Op::Push);
+                        self.ctx.write(Op::AccField(g2 as _, 0));
+                        self.ctx.write(Op::ObjCall(2));
+                    }
+                    _ => (),
+                }
+
+                for field in body.iter() {
+                    match &field.node {
+                        ClassField::Method(name, params, body) => {
+                            self.ctx.compile_access_get(&acc);
+                            self.ctx.write(Op::Push);
+                            self.compile_lambda(params, body)?;
+                            let g = self
+                                .ctx
+                                .global(Rc::new(Global::Symbol(name.to_string().into_boxed_str())));
+                            self.ctx.write(Op::SetField(g as _, 0));
+                        }
+                        _ => (),
+                    }
+                }
+
+                let initializer = body
+                    .iter()
+                    .find(|x| matches!(x.node, ClassField::Initializer(_)));
+                self.ctx.compile_access_get(&acc);
+                self.ctx.write(Op::Push);
+                self.compile_context(&params, move |cc| {
+                    if let Some(inherit) = inherit {
+                        match inherit.node {
+                            ClassField::Inherit(_, ref args) => {
+                                for arg in args {
+                                    cc.expr(arg, false)?;
+                                    cc.ctx.write(Op::Push);
+                                }
+                                cc.ctx.write(Op::AccThis);
+                                cc.ctx.write(Op::Super(args.len() as _, 0));
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    for (name, expr) in varset {
+                        cc.ctx.write(Op::AccThis);
+                        cc.ctx.write(Op::Push);
+                        cc.expr(&expr, false)?;
+                        let g = cc
+                            .ctx
+                            .global(Rc::new(Global::Symbol(name.to_string().into_boxed_str())));
+                        cc.ctx.write(Op::SetField(g as _, 0));
+                    }
+                    match initializer.as_ref().map(|x| &x.node) {
+                        Some(ClassField::Initializer(expr)) => cc.expr(expr, false),
+                        _ => Ok(()),
+                    }
+                })?;
+                let g = self.ctx.global(Rc::new(Global::Symbol(
+                    "constructor".to_string().into_boxed_str(),
+                )));
+                self.ctx.write(Op::SetField(g as _, 0));
+
+                self.ctx.leave_scope();
+            }
+            _ => todo!(),
+        }
+        Ok(())
     }
 }
 

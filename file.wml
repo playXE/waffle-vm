@@ -1,6 +1,11 @@
-let fs = import std.fs;
-let core = import std.core;
-let x = $file_open("file.wml", fs.RO);
-let contents = $file_read_to_end(x);
-core.print contents;
-$minorGC();
+class point2d x y = object {
+    val x = x;
+    val y = y;
+};
+
+class point3d x y z = object {
+    inherit point2d -> (x, y);
+    val z = z;
+};
+
+let p = new point3d 1 2 3;

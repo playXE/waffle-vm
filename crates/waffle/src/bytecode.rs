@@ -75,7 +75,7 @@ pub fn write_module(code: &[Op], globals: &[Rc<Global>]) -> Vec<u8> {
                     buf.write_u8(7)?;
                     buf.write_u32::<LittleEndian>(x as _)?;
                 }
-                Op::AccField(x) => {
+                Op::AccField(x, _) => {
                     buf.write_u8(8)?;
                     buf.write_u32::<LittleEndian>(x as _)?;
                 }
@@ -100,7 +100,7 @@ pub fn write_module(code: &[Op], globals: &[Rc<Global>]) -> Vec<u8> {
                     buf.write_u8(14)?;
                     buf.write_u32::<LittleEndian>(x as _)?;
                 }
-                Op::SetField(x) => {
+                Op::SetField(x, _) => {
                     buf.write_u8(15)?;
                     buf.write_u32::<LittleEndian>(x as _)?;
                 }
@@ -176,7 +176,10 @@ pub fn write_module(code: &[Op], globals: &[Rc<Global>]) -> Vec<u8> {
                 Op::TypeOf => buf.write_u8(52)?,
                 Op::Compare => buf.write_u8(53)?,
                 Op::Hash => buf.write_u8(54)?,
-                Op::New => buf.write_u8(55)?,
+                Op::New(argc, _) => {
+                    buf.write_u8(55)?;
+                    buf.write_u32::<LittleEndian>(argc)?;
+                }
                 Op::JumpTable(x) => {
                     buf.write_u8(56)?;
                     buf.write_u32::<LittleEndian>(x as _)?;
@@ -199,6 +202,11 @@ pub fn write_module(code: &[Op], globals: &[Rc<Global>]) -> Vec<u8> {
                     buf.write_u32::<LittleEndian>(argc as _)?;
                 }
                 Op::CloseUpvalue => buf.write_u8(64)?,
+                Op::Swap => buf.write_u8(65)?,
+                Op::Super(argc, _) => {
+                    buf.write_u8(66)?;
+                    buf.write_u16::<LittleEndian>(argc)?;
+                }
                 Op::Last => buf.write_u8(255)?,
                 _ => unreachable!(),
             }
@@ -215,12 +223,12 @@ pub fn write_module(code: &[Op], globals: &[Rc<Global>]) -> Vec<u8> {
     buf.into_inner()
 }
 
-pub fn read_module<T: AsRef<[u8]>>(buf: &T) -> (Vec<Op>, Vec<Rc<Global>>) {
+pub fn read_module<T: AsRef<[u8]>>(buf: &T) -> (Vec<Op>, Vec<Rc<Global>>, u32) {
     let mut buf = Cursor::new(buf.as_ref());
 
     let mut ops = vec![];
     let mut globals = vec![];
-
+    let mut feedback = 0;
     let mut res = || -> Result<(), std::io::Error> {
         let nglobals = buf.read_u32::<LittleEndian>()?;
         let code_size = buf.read_u32::<LittleEndian>()?;
@@ -307,7 +315,8 @@ pub fn read_module<T: AsRef<[u8]>>(buf: &T) -> (Vec<Op>, Vec<Rc<Global>>) {
                 }
                 8 => {
                     let i = buf.read_i32::<LittleEndian>()?;
-                    AccField(i)
+                    feedback += 1;
+                    AccField(i, feedback - 1)
                 }
                 9 => AccArray,
                 10 => {
@@ -332,7 +341,8 @@ pub fn read_module<T: AsRef<[u8]>>(buf: &T) -> (Vec<Op>, Vec<Rc<Global>>) {
                 }
                 15 => {
                     let i = buf.read_i32::<LittleEndian>()?;
-                    SetField(i)
+                    feedback += 1;
+                    SetField(i, feedback - 1)
                 }
                 16 => SetArray,
                 17 => {
@@ -400,12 +410,17 @@ pub fn read_module<T: AsRef<[u8]>>(buf: &T) -> (Vec<Op>, Vec<Rc<Global>>) {
                 46 => Neq,
                 47 => Lt,
                 48 => Lte,
-                49 => Gte,
+                49 => Gt,
+                50 => Gte,
                 51 => Not,
                 52 => TypeOf,
                 53 => Compare,
                 54 => Hash,
-                55 => New,
+                55 => {
+                    let argc = buf.read_u32::<LittleEndian>()?;
+                    feedback += 1;
+                    New(argc, feedback - 1)
+                }
                 56 => {
                     let i = buf.read_i32::<LittleEndian>()?;
                     JumpTable(i)
@@ -429,6 +444,13 @@ pub fn read_module<T: AsRef<[u8]>>(buf: &T) -> (Vec<Op>, Vec<Rc<Global>>) {
                     Ctor(i)
                 }
                 64 => CloseUpvalue,
+                65 => Swap,
+                66 => {
+                    let argc = buf.read_u16::<LittleEndian>()?;
+                    let fdbk = feedback;
+                    feedback += 1;
+                    Super(argc, fdbk)
+                }
                 255 => Last,
                 x => unreachable!("{}", x),
             };
@@ -440,5 +462,5 @@ pub fn read_module<T: AsRef<[u8]>>(buf: &T) -> (Vec<Op>, Vec<Rc<Global>>) {
     };
 
     res().unwrap();
-    (ops, globals)
+    (ops, globals, feedback)
 }

@@ -72,11 +72,11 @@ use std::convert::Into;
 use std::ffi::{CStr, OsStr};
 use std::fmt::{Debug, Display};
 use std::mem;
-use std::os::raw::{c_char, c_double, c_float, c_int, c_long, c_short, c_void};
+use std::os::raw::{c_char, c_double, c_long, c_void};
 use std::ptr;
 
 use crate::builtin::alloc_buffer;
-use crate::memory::{Finalize, Object, Trace};
+use crate::memory::{Finalize, Managed, Trace};
 use crate::value::Value;
 use crate::vm::VM;
 
@@ -101,7 +101,7 @@ pub struct Library {
 
 unsafe impl Trace for Library {}
 unsafe impl Finalize for Library {}
-impl Object for Library {}
+impl Managed for Library {}
 
 /// A function with a fixed number of arguments.
 pub(crate) struct Function {
@@ -120,8 +120,9 @@ pub(crate) struct Function {
 
 unsafe impl Trace for Function {}
 unsafe impl Finalize for Function {}
-impl Object for Function {}
+impl Managed for Function {}
 
+#[allow(dead_code)]
 pub(crate) fn type_size(id: i64) -> Result<Value, String> {
     let size = unsafe {
         match id {
@@ -147,6 +148,7 @@ pub(crate) fn type_size(id: i64) -> Result<Value, String> {
 /// Returns the alignment of a type ID.
 ///
 /// The alignment of the type is returned as a tagged integer.
+#[allow(dead_code)]
 pub(crate) fn type_alignment(id: i64) -> Result<Value, String> {
     let size = unsafe {
         match id {
@@ -208,7 +210,7 @@ macro_rules! match_ffi_type {
 use crate::memory::gcwrapper::*;
 use crate::value::*;
 impl Argument {
-    unsafe fn wrap(vm: &mut VM, ffi_type: *mut ffi_type, val: Value) -> Result<Argument, String> {
+    unsafe fn wrap(_vm: &mut VM, ffi_type: *mut ffi_type, val: Value) -> Result<Argument, String> {
         let argument = match_ffi_type!(
             ffi_type,
             pointer => {
@@ -359,6 +361,7 @@ impl Library {
     }
 }
 
+#[allow(dead_code)]
 impl Pointer {
     pub(crate) fn new(inner: RawPointer) -> Self {
         Pointer { inner }
@@ -514,7 +517,7 @@ pub struct PointerObject(pub *mut u8);
 
 unsafe impl Trace for Pointer {}
 unsafe impl Finalize for Pointer {}
-impl Object for Pointer {}
+impl Managed for Pointer {}
 
 impl Function {
     /// Creates a new function using object pointers.

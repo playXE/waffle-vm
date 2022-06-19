@@ -8,32 +8,40 @@ use crate::{
     builtin::make_prim,
     gc_frame,
     memory::gcwrapper::{Array, Gc, Nullable, Str},
+    object::*,
+    opcode::Feedback,
     opcode::Op,
     reflect::Global,
-    value::{Function, Module, Obj, Sym, Value},
-    vm::{Id, Lib, LibList, VM},
+    value::{Function, Module, Value},
+    vm::{symbol_table, Id, Internable, Lib, LibList, Symbol, VM},
 };
 
-pub fn read_module(vm: &mut VM, ops: &[Op], globals: &[Rc<Global>], loader: Value) -> Gc<Module> {
+pub fn read_module(
+    vm: &mut VM,
+    ops: &[Op],
+    globals: &[Rc<Global>],
+    loader: Value,
+    feedback: u32,
+) -> Gc<Module> {
     unsafe {
-        let mut arr = vm.gc().array(globals.len(), Value::Null);
+        gc_frame!(vm.gc().roots() => arr = vm.gc().array(globals.len(), Value::Null));
+        gc_frame!(vm.gc().roots() => fdbk = vm.gc().array(feedback as _, Feedback::None));
 
-        let module = vm
-            .gc()
-            .malloc_varsize::<Module>(ops.len() + 1, &mut [&mut arr]);
+        let module = vm.gc().malloc_varsize::<Module>(ops.len() + 1, &mut []);
 
         module.as_mut_ptr().write(Module {
             name: Value::Null,
             globals: arr.nullable(),
             exports: Value::Null,
             loader,
+            feedback: fdbk.nullable(),
             code_size: ops.len() + 1,
             code: [],
         });
 
         let mut module = module.assume_init();
         gc_frame!(vm.gc().roots() => module: Gc<Module>);
-        let exports = Obj::new(vm);
+        let exports = Object::new_empty(vm);
         module.exports = Value::Object(exports);
         for (pos, global) in globals.iter().enumerate() {
             let val = match &**global {
@@ -49,13 +57,14 @@ pub fn read_module(vm: &mut VM, ops: &[Op], globals: &[Rc<Global>], loader: Valu
                         module: module.nullable(),
                         addr: *pos as usize,
                         prim: false,
+                        construct_struct: Nullable::NULL
                     });
                     Value::Function(func)
                 }
                 Global::Float(x) => Value::Float(f64::from_bits(*x)),
                 Global::Int(x) => Value::Int(*x as i32),
                 Global::Str(x) => Value::Str(vm.gc().str(x)),
-                Global::Symbol(x) => Value::Symbol(vm.intern(x)),
+                Global::Symbol(x) => Value::Symbol(vm.gc().fixed(x.intern())),
                 Global::Var(_) => Value::Null,
                 Global::Upval(upvals) => {
                     let mut arr = vm.gc().array(upvals.len(), Value::Null);
@@ -78,12 +87,18 @@ pub fn read_module(vm: &mut VM, ops: &[Op], globals: &[Rc<Global>], loader: Valu
                 Op::AccBuiltin(ix) => {
                     let f = module.globals[ix as usize];
                     match f {
-                        x if x.is_symbol() => match &**x.downcast_ref::<Sym>().unwrap().name {
+                        x if x.is_symbol() => match x
+                            .downcast_ref::<Symbol>()
+                            .unwrap()
+                            .description(symbol_table())
+                            .as_str()
+                        {
                             "loader" => module[i] = Op::AccBuiltinResolved(loader),
                             "exports" => module[i] = Op::AccBuiltinResolved(module.exports),
                             _ => {
                                 let b = vm.builtins;
-                                let tmp = b.field(vm, &f);
+                                let id = f.to_symbol(vm);
+                                let tmp = b.field(vm, id);
                                 module[i] = Op::AccBuiltinResolved(tmp);
                             }
                         },
@@ -93,7 +108,7 @@ pub fn read_module(vm: &mut VM, ops: &[Op], globals: &[Rc<Global>], loader: Valu
                 _ => (),
             }
         }
-        module.get()
+        module.get_copy()
     }
 }
 
@@ -132,29 +147,29 @@ fn open_module(path: &[Value], mname: &str) -> std::io::Result<Vec<u8>> {
 pub extern "C" fn load_module(vm: &mut VM, mname: &Value, vthis: &Value) -> Value {
     let mut o = vm.vthis;
     let mut cache = Value::Null;
-    let mut scache = Value::Symbol(vm.id(Id::Cache));
-    let mut spath = Value::Symbol(vm.id(Id::Path));
+    let scache = vm.id(Id::Cache);
+    let spath = vm.id(Id::Path);
 
-    gc_frame!(vm.gc().roots() => o: Value,cache: Value,scache: Value,spath: Value );
-    cache.set(o.field(vm, &scache));
+    gc_frame!(vm.gc().roots() => o: Value,cache: Value);
+    cache.set(o.field(vm, scache));
     {
-        let mut mid = Value::Symbol(vm.intern(format!("{}", mname)));
-        let mv = cache.field(vm, &mid);
+        let mid = format!("{}", mname).intern();
+        let mv = cache.field(vm, mid);
         if let Some(module) = mv.downcast_ref::<Module>() {
             return module.exports;
         }
-        let path = o.field(vm, &spath).array();
+        let path = o.field(vm, spath).array();
 
         let code = open_module(&*path, &format!("{}", mname))
             .unwrap_or_else(|err| vm.throw_str(format!("failed to open module: {}", err)));
-        let (ops, globals) = crate::bytecode::read_module(&code);
+        let (ops, globals, feedback) = crate::bytecode::read_module(&code);
 
-        let mut m = read_module(vm, &ops, &globals, *vthis);
-        m.name = mid;
+        let mut m = read_module(vm, &ops, &globals, *vthis, feedback);
+        m.name = Value::Symbol(vm.gc().fixed(mid));
         let mut mv = Value::encode_object_value(m);
-        gc_frame!(vm.gc().roots() => m: Gc<Module>, mv:Value, mid:Value);
-        cache.set_field(vm, &mid, &mv);
-        match vm.execute(m.get()) {
+        gc_frame!(vm.gc().roots() => m: Gc<Module>, mv:Value);
+        cache.set_field(vm, mid, mv.get_copy());
+        match vm.execute(m.get_copy()) {
             Err(e) => vm.throw(e),
             _ => (),
         }
@@ -258,14 +273,14 @@ pub fn load_primitive(
 pub extern "C" fn loader_loadprim(vm: &mut VM, prim: &Value, nargs: &Value) -> Value {
     let o = vm.vthis;
     let id = vm.id(Id::Libs);
-    let libs = o.field(vm, &Value::Symbol(id));
+    let libs = o.field(vm, id);
     let mut libs = match libs.downcast_ref::<LibList>() {
         Some(liblist) => liblist,
         _ => vm.throw_str("library list malformed"),
     };
 
-    let spath = Value::Symbol(vm.id(Id::Path));
-    let mut path = o.field(vm, &spath).array();
+    let spath = vm.id(Id::Path);
+    let mut path = o.field(vm, spath).array();
 
     gc_frame!(vm.gc().roots() =>libs: Gc<LibList>,path: Gc<Array<Value>>);
 
@@ -280,6 +295,7 @@ pub extern "C" fn loader_loadprim(vm: &mut VM, prim: &Value, nargs: &Value) -> V
         module: Nullable::NULL,
         addr: ptr,
         prim: true,
+        construct_struct: Nullable::NULL
     });
     Value::Primitive(f)
 }
@@ -303,10 +319,10 @@ fn get_loader_path(vm: &mut VM) -> Value {
     gc_frame!(vm.gc().roots() => buf: Gc<Array<Value>>);
     for (pos, path) in paths.iter().enumerate() {
         buf[pos] = Value::Str(vm.gc().str(path));
-        vm.gc().write_barrier(buf.get());
+        vm.gc().write_barrier(buf.get_copy());
     }
 
-    Value::Array(buf.get())
+    Value::Array(buf.get_copy())
 }
 
 pub fn waffle_default_loader(vm: &mut VM) -> Value {
@@ -316,32 +332,32 @@ pub fn waffle_default_loader(vm: &mut VM) -> Value {
     for (pos, arg) in std::env::args().enumerate() {
         let arg = vm.gc().str(arg);
         args[pos] = Value::Str(arg);
-        vm.gc().write_barrier(args.get());
+        vm.gc().write_barrier(args.get_copy());
     }
-    loader.set(Value::Object(Obj::new(vm)));
+    loader.set(Value::Object(Object::new_empty(vm)));
 
     let path = get_loader_path(vm);
     let pathk = vm.id(Id::Path);
-    loader.set_field(vm, &Value::Symbol(pathk), &path);
-    let obj = Obj::new(vm);
+    loader.set_field(vm, pathk, path);
+    let obj = Object::new_empty(vm);
     let cache = vm.id(Id::Cache);
-    loader.set_field(vm, &Value::Symbol(cache), &Value::Object(obj));
-    let kargs = vm.intern("args");
-    loader.set_field(vm, &Value::Symbol(kargs), &Value::Array(args.get()));
+    loader.set_field(vm, cache, Value::Object(obj));
+    let kargs = "args".intern();
+    loader.set_field(vm, kargs, Value::Array(args.get_copy()));
     let mut f = make_prim(vm, load_module as _, 2, false);
-    let mut s = Value::Symbol(vm.intern("loadmodule"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    loader.set_field(vm, &s, &f);
-    
+    let s = "loadmodule".intern();
+    gc_frame!(vm.gc().roots() => f: Value);
+    loader.set_field(vm, s, f.get_copy());
+
     let mut f = make_prim(vm, loader_loadprim as _, 2, false);
-    let mut s = Value::Symbol(vm.intern("loadprim"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    loader.set_field(vm, &s, &f);
+    let s = "loadprim".intern();
+    gc_frame!(vm.gc().roots() => f: Value);
+    loader.set_field(vm, s, f.get_copy());
 
     let mut liblist = Value::Abstract(vm.gc().fixed(LibList { v: vec![] }).as_dyn());
-    let mut id = Value::Symbol(vm.id(Id::Libs));
+    let id = vm.id(Id::Libs);
 
-    gc_frame!(vm.gc().roots() => liblist: Value,id: Value);
-    loader.set_field(vm, &id, &liblist);
-    loader.get()
+    gc_frame!(vm.gc().roots() => liblist: Value);
+    loader.set_field(vm, id, liblist.get_copy());
+    loader.get_copy()
 }

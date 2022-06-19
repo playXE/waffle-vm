@@ -1,4 +1,5 @@
 use std_::{
+    hash::Hash,
     mem::MaybeUninit,
     ops::{Deref, DerefMut},
     ptr::null_mut,
@@ -12,7 +13,7 @@ use super::{
 use std::{marker::PhantomData, ptr::NonNull};
 
 #[repr(transparent)]
-pub struct Gc<T: Object + ?Sized> {
+pub struct Gc<T: Managed + ?Sized> {
     pub(crate) header: NonNull<HeapObjectHeader>,
     marker: PhantomData<*mut T>,
 }
@@ -28,13 +29,13 @@ unsafe impl Allocation for WeakInner {
 
 unsafe impl Finalize for WeakInner {}
 unsafe impl Trace for WeakInner {}
-impl Object for WeakInner {}
-pub struct WeakRef<T: Object + ?Sized> {
+impl Managed for WeakInner {}
+pub struct WeakRef<T: Managed + ?Sized> {
     pub(crate) value: Gc<WeakInner>,
     marker: PhantomData<*mut T>,
 }
 
-impl<T: Object + ?Sized> WeakRef<T> {
+impl<T: Managed + ?Sized> WeakRef<T> {
     pub fn upgrade(self) -> Option<Gc<T>> {
         self.value.weakptr.map(|p| Gc {
             header: p,
@@ -43,14 +44,14 @@ impl<T: Object + ?Sized> WeakRef<T> {
     }
 }
 
-impl<T: Object + ?Sized> Copy for WeakRef<T> {}
-impl<T: Object + ?Sized> Clone for WeakRef<T> {
+impl<T: Managed + ?Sized> Copy for WeakRef<T> {}
+impl<T: Managed + ?Sized> Clone for WeakRef<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-unsafe impl<T: Object + ?Sized> Trace for WeakRef<T> {
+unsafe impl<T: Managed + ?Sized> Trace for WeakRef<T> {
     fn trace(&mut self, vis: &mut dyn Visitor) {
         mark(vis, &mut self.value);
     }
@@ -68,9 +69,9 @@ unsafe impl<T: Finalize> Finalize for MaybeUninit<T> {
     }
 }
 
-impl<T: Object> Object for MaybeUninit<T> {}
+impl<T: Managed> Managed for MaybeUninit<T> {}
 
-impl<T: Object> Gc<MaybeUninit<T>> {
+impl<T: Managed> Gc<MaybeUninit<T>> {
     pub unsafe fn assume_init(self) -> Gc<T> {
         Gc {
             header: self.header,
@@ -87,27 +88,27 @@ impl<T: Object> Gc<MaybeUninit<T>> {
     }
 }
 
-impl<T: Object + ?Sized> Copy for Gc<T> {}
-impl<T: Object + ?Sized> Clone for Gc<T> {
+impl<T: Managed + ?Sized> Copy for Gc<T> {}
+impl<T: Managed + ?Sized> Clone for Gc<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T: Object> Deref for Gc<T> {
+impl<T: Managed> Deref for Gc<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         unsafe { &*self.header.as_ptr().add(1).cast::<T>() }
     }
 }
 
-impl<T: Object> DerefMut for Gc<T> {
+impl<T: Managed> DerefMut for Gc<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *self.header.as_ptr().add(1).cast::<T>() }
     }
 }
 
-unsafe impl<T: Object + ?Sized> Trace for Gc<T> {
+unsafe impl<T: Managed + ?Sized> Trace for Gc<T> {
     fn trace(&mut self, vis: &mut dyn Visitor) {
         mark(vis, self);
     }
@@ -125,7 +126,7 @@ impl GCWrapper {
     }
     /// Allocates fixed sized object on the heap
     #[inline]
-    pub unsafe fn malloc_fixedsize<A: 'static + Allocation + Object>(
+    pub unsafe fn malloc_fixedsize<A: 'static + Allocation + Managed>(
         &mut self,
         safestack: &mut [&mut dyn Trace],
     ) -> Gc<MaybeUninit<A>> {
@@ -138,7 +139,7 @@ impl GCWrapper {
 
     /// Allocates variable-sized object on the heap
     #[inline]
-    pub unsafe fn malloc_varsize<A: 'static + Allocation + Object>(
+    pub unsafe fn malloc_varsize<A: 'static + Allocation + Managed>(
         &mut self,
         length: usize,
         safestack: &mut [&mut dyn Trace],
@@ -176,7 +177,7 @@ impl GCWrapper {
             uninit.assume_init()
         }
     }
-    pub fn weak<T: Object + ?Sized>(&mut self, value: Gc<T>) -> WeakRef<T> {
+    pub fn weak<T: Managed + ?Sized>(&mut self, value: Gc<T>) -> WeakRef<T> {
         let p = self.fixed(WeakInner {
             weakptr: Some(value.header),
         });
@@ -186,7 +187,7 @@ impl GCWrapper {
         }
     }
 
-    pub fn weak_null<T: Object + ?Sized>(&mut self) -> WeakRef<T> {
+    pub fn weak_null<T: Managed + ?Sized>(&mut self) -> WeakRef<T> {
         WeakRef {
             value: self.fixed(WeakInner { weakptr: None }),
             marker: PhantomData,
@@ -194,7 +195,7 @@ impl GCWrapper {
     }
     /// Allocates fixed sized object on the heap and initializes it with `value`.
     #[inline]
-    pub fn fixed<A: 'static + Allocation + Object>(&mut self, mut value: A) -> Gc<A> {
+    pub fn fixed<A: 'static + Allocation + Managed>(&mut self, mut value: A) -> Gc<A> {
         unsafe {
             let uninit = self.malloc_fixedsize::<A>(&mut [&mut value]);
 
@@ -221,19 +222,19 @@ impl GCWrapper {
         self.0.minor_collection(safestack);
     }
     #[inline]
-    pub fn write_barrier(&mut self, object: Gc<impl Object>) {
+    pub fn write_barrier(&mut self, object: Gc<impl Managed>) {
         unsafe {
             self.0.write_barrier(object.header.as_ptr());
         }
     }
 
     #[inline]
-    pub fn identity<T: ?Sized + Object>(&mut self, value: Gc<T>) -> usize {
+    pub fn identity<T: ?Sized + Managed>(&mut self, value: Gc<T>) -> usize {
         self.0.identity(value.header.as_ptr())
     }
 
     #[inline]
-    pub fn identity_weak(&mut self, value: WeakRef<impl Object>) -> usize {
+    pub fn identity_weak(&mut self, value: WeakRef<impl Managed>) -> usize {
         self.identity(value.value)
     }
 }
@@ -243,7 +244,7 @@ macro_rules! impl_prim {
         $(
             unsafe impl Trace for $t {}
             unsafe impl Finalize for $t {}
-            impl Object for $t {}
+            impl Managed for $t {}
         )*
     };
 }
@@ -252,7 +253,7 @@ impl_prim!(u8 i8 u16 i16 u32 i32 u64 i64 u128 i128 bool f32 f64);
 
 use std::fmt;
 
-impl<T: Object + ?Sized> fmt::Pointer for Gc<T> {
+impl<T: Managed + ?Sized> fmt::Pointer for Gc<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:p}", self.header)
     }
@@ -300,7 +301,7 @@ unsafe impl<T: Trace> Trace for Array<T> {
     }
 }
 
-impl<T: Trace> Object for Array<T> {}
+impl<T: Trace> Managed for Array<T> {}
 
 unsafe impl<T: Trace> Allocation for Array<T> {
     const LIGHT_FINALIZER: bool = true;
@@ -353,7 +354,7 @@ unsafe impl Allocation for Str {
 unsafe impl Trace for Str {}
 unsafe impl Finalize for Str {}
 
-impl Object for Str {}
+impl Managed for Str {}
 
 unsafe impl<T: Trace> Trace for Option<T> {
     fn trace(&mut self, vis: &mut dyn Visitor) {
@@ -364,8 +365,8 @@ unsafe impl<T: Trace> Trace for Option<T> {
     }
 }
 
-impl Gc<dyn Object> {
-    pub fn downcast<T: 'static + Object>(self) -> Option<Gc<T>> {
+impl Gc<dyn Managed> {
+    pub fn downcast<T: 'static + Managed>(self) -> Option<Gc<T>> {
         unsafe {
             if self.header.as_ref().tid().as_vtable.type_id == TypeId::of::<T>() {
                 Some(Gc {
@@ -378,21 +379,25 @@ impl Gc<dyn Object> {
         }
     }
 
-    pub unsafe fn downcast_unchecked<T: 'static + Object>(self) -> Gc<T> {
+    pub unsafe fn downcast_unchecked<T: 'static + Managed>(self) -> Gc<T> {
         self.downcast().unwrap_unchecked()
     }
 
-    pub fn is<T: 'static + Object>(self) -> bool {
+    pub fn is<T: 'static + Managed>(self) -> bool {
         self.downcast::<T>().is_some()
     }
 }
 
-impl<T: Object + ?Sized> Gc<T> {
-    pub fn as_dyn(self) -> Gc<dyn Object> {
+impl<T: Managed + ?Sized> Gc<T> {
+    pub fn as_dyn(self) -> Gc<dyn Managed> {
         Gc {
             header: self.header,
             marker: PhantomData,
         }
+    }
+
+    pub fn ptr_eq(this: Self, other: Self) -> bool {
+        this.header == other.header
     }
 
     pub fn get_size(this: Self) -> usize {
@@ -426,25 +431,25 @@ impl<T: Object + ?Sized> Gc<T> {
 }
 
 #[repr(transparent)]
-pub struct Nullable<T: Object + ?Sized> {
+pub struct Nullable<T: Managed + ?Sized> {
     ptr: *mut HeapObjectHeader,
     marker: PhantomData<*mut T>,
 }
 
-impl<T: Object + ?Sized> Copy for Nullable<T> {}
-impl<T: Object + ?Sized> Clone for Nullable<T> {
+impl<T: Managed + ?Sized> Copy for Nullable<T> {}
+impl<T: Managed + ?Sized> Clone for Nullable<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T: Object + ?Sized> Nullable<T> {
+impl<T: Managed + ?Sized> Nullable<T> {
     pub const NULL: Self = Self {
         ptr: null_mut(),
         marker: PhantomData,
     };
 
-    pub fn as_dyn(self) -> Nullable<dyn Object> {
+    pub fn as_dyn(self) -> Nullable<dyn Managed> {
         Nullable {
             ptr: self.ptr,
             marker: PhantomData,
@@ -465,10 +470,14 @@ impl<T: Object + ?Sized> Nullable<T> {
     pub fn is_not_null(self) -> bool {
         !self.ptr.is_null()
     }
+
+    pub fn ptr_eq(this: Self, other: Self) -> bool {
+        this.ptr == other.ptr
+    }
 }
 
-impl Nullable<dyn Object> {
-    pub fn downcast<T: 'static + Object>(self) -> Nullable<T> {
+impl Nullable<dyn Managed> {
+    pub fn downcast<T: 'static + Managed>(self) -> Nullable<T> {
         unsafe {
             assert!(!self.ptr.is_null(), "attempt to downcast null reference");
             if (*self.ptr).tid().as_vtable.type_id == TypeId::of::<T>() {
@@ -482,12 +491,12 @@ impl Nullable<dyn Object> {
         }
     }
 
-    pub fn is<T: 'static + Object>(self) -> bool {
+    pub fn is<T: 'static + Managed>(self) -> bool {
         !self.downcast::<T>().is_null()
     }
 }
 
-unsafe impl<T: Object + ?Sized> Trace for Nullable<T> {
+unsafe impl<T: Managed + ?Sized> Trace for Nullable<T> {
     fn trace(&mut self, vis: &mut dyn Visitor) {
         if !self.is_null() {
             unsafe {
@@ -497,20 +506,20 @@ unsafe impl<T: Object + ?Sized> Trace for Nullable<T> {
     }
 }
 
-impl<T: Object + Sized> Deref for Nullable<T> {
+impl<T: Managed + Sized> Deref for Nullable<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         assert!(!self.ptr.is_null(), "trying to read null reference");
         unsafe { &*self.ptr.add(1).cast::<T>() }
     }
 }
-impl<T: Object> DerefMut for Nullable<T> {
+impl<T: Managed> DerefMut for Nullable<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         assert!(!self.ptr.is_null(), "trying to read null reference");
         unsafe { &mut *self.ptr.add(1).cast::<T>() }
     }
 }
-impl<T: Object> std::fmt::Pointer for Nullable<T> {
+impl<T: Managed> std::fmt::Pointer for Nullable<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:p}", self.ptr)
     }
@@ -598,4 +607,94 @@ unsafe impl Trace for () {}
 
 unsafe impl Trace for std::fs::File {}
 unsafe impl Finalize for std::fs::File {}
-impl Object for std::fs::File {}
+impl Managed for std::fs::File {}
+
+impl<T: PartialEq + Managed> PartialEq for Gc<T> {
+    fn eq(&self, other: &Self) -> bool {
+        (&**self) == (&**other)
+    }
+}
+
+impl<T: Eq + Managed> Eq for Gc<T> {}
+impl<T: Hash + Managed> Hash for Gc<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (&**self).hash(state);
+    }
+}
+impl<T: PartialEq + Managed> PartialEq for Nullable<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr.is_null() && other.is_null() || (self.as_gc() == other.as_gc())
+    }
+}
+
+impl<T: Eq + Managed> Eq for Nullable<T> {}
+
+impl<T: Hash + Managed> Hash for Nullable<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        if self.is_null() {
+            state.write_u8(0);
+        } else {
+            state.write_u8(1);
+            self.as_gc().hash(state);
+        }
+    }
+}
+
+impl<T: PartialEq + Managed> PartialEq<Nullable<T>> for Gc<T> {
+    fn eq(&self, other: &Nullable<T>) -> bool {
+        if other.is_null() {
+            false
+        } else {
+            self == &other.as_gc()
+        }
+    }
+}
+
+impl<T: PartialEq + Managed> PartialEq<Gc<T>> for Nullable<T> {
+    fn eq(&self, other: &Gc<T>) -> bool {
+        if self.is_null() {
+            false
+        } else {
+            self.as_gc() == *other
+        }
+    }
+}
+
+unsafe impl<T: Trace> Trace for Vec<T> {
+    fn trace(&mut self, visitor: &mut dyn Visitor) {
+        for elem in self.iter_mut() {
+            elem.trace(visitor);
+        }
+    }
+}
+
+impl<T: Managed + ?Sized> Into<Nullable<T>> for Gc<T> {
+    fn into(self) -> Nullable<T> {
+        self.nullable()
+    }
+}
+
+impl<T: Managed> Into<Nullable<T>> for Option<Gc<T>> {
+    fn into(self) -> Nullable<T> {
+        match self {
+            Some(gc) => gc.nullable(),
+            None => Nullable::NULL,
+        }
+    }
+}
+
+impl<T: Managed> Into<Option<Gc<T>>> for Nullable<T> {
+    fn into(self) -> Option<Gc<T>> {
+        if self.is_not_null() {
+            Some(self.as_gc())
+        } else {
+            None
+        }
+    }
+}
+
+impl<T: Managed> Default for Nullable<T> {
+    fn default() -> Self {
+        Self::NULL
+    }
+}

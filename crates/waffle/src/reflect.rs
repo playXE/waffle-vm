@@ -2,7 +2,7 @@
 use crate::gc_frame;
 use crate::memory::gcwrapper::{Gc, Nullable};
 use crate::value::{Function, Module, Value};
-use crate::vm::VM;
+use crate::vm::{Internable, VM};
 
 use super::opcode::*;
 use std::collections::hash_map::Entry;
@@ -27,6 +27,7 @@ pub enum Access {
     Stack(isize),
     Global(isize),
     Field(isize),
+    FieldThis(isize),
     Index(u32),
     Array,
     This,
@@ -50,14 +51,29 @@ pub struct Globals {
 }
 
 pub struct Scope {
-    locals: Vec<Local>,
+    pub locals: Vec<Var>,
     save_stack: isize,
+}
+
+impl Scope {
+    pub fn nlocals(&self) -> usize {
+        self.locals
+            .iter()
+            .filter(|x| matches!(x, Var::Local(_)))
+            .count()
+    }
+    pub fn has_upvalues(&self) -> bool {
+        self.locals.iter().any(|x| match x {
+            Var::Local(x) => x.is_captured(),
+            _ => false,
+        })
+    }
 }
 
 pub struct Context<'a> {
     g: &'a mut Globals,
     pub ops: Vec<Op>,
-    pub locals: &'a mut HashMap<String, isize>,
+
     pub env: HashMap<String, isize>,
     pub nenv: isize,
     pub stack: isize,
@@ -75,10 +91,31 @@ use Op::*;
 
 pub fn stack_delta(op: Op) -> isize {
     match op {
-        Add | Sub | Mul | Div | Mod | Shl | Shr | UShr | Or | And | Xor | Eq | Neq | Gt | Gte
-        | Lt | Lte | PhysCompare | AccArray | SetField(_) | SetIndex(_) | Compare => -1,
+        Add
+        | Sub
+        | Mul
+        | Div
+        | Mod
+        | Shl
+        | Shr
+        | UShr
+        | Or
+        | And
+        | Xor
+        | Eq
+        | Neq
+        | Gt
+        | Gte
+        | Lt
+        | Lte
+        | PhysCompare
+        | AccArray
+        | SetField(_, _)
+        | SetIndex(_)
+        | Compare => -1,
         SetArray => -2,
         CloseUpvalue => -1,
+        Swap => 0,
         Push => 1,
         Pop(x) => -(x as isize),
         Apply(nargs) | Call(nargs) => -(nargs as isize),
@@ -87,6 +124,8 @@ pub fn stack_delta(op: Op) -> isize {
         MakeEnv(_) => 0,
         MakeArray(n) => -(n as isize),
         Trap(_) => 6,
+        Super(nargs, _) => -(nargs as isize),
+        New(nargs, _) => -(nargs as isize),
         EndTrap => -6,
         _ => 0,
     }
@@ -117,24 +156,31 @@ impl<'a> Context<'a> {
         }
     }
 
-    pub fn enter_scope(&mut self) {
+    pub fn enter_scope(&mut self) -> usize {
+        let index = self.scope.len();
         self.scope.push(Scope {
             locals: vec![],
             save_stack: self.stack,
         });
+        index
     }
 
     pub fn leave_scope(&mut self) {
         let scope = self.scope.pop().unwrap();
-        let there_is_captured = scope.locals.iter().any(|x| x.is_captured());
+        let there_is_captured = scope.has_upvalues();
         if !there_is_captured {
-            self.write(Op::Pop(scope.locals.len() as _));
+            self.write(Op::Pop(scope.nlocals() as _));
         } else {
-            for local in scope.locals.iter().rev() {
-                if local.is_captured() {
-                    self.write(Op::CloseUpvalue);
-                } else {
-                    self.write(Op::Pop(1));
+            for var in scope.locals.iter().rev() {
+                match var {
+                    Var::Local(local) => {
+                        if local.is_captured() {
+                            self.write(Op::CloseUpvalue);
+                        } else {
+                            self.write(Op::Pop(1));
+                        }
+                    }
+                    _ => (),
                 }
             }
         }
@@ -156,6 +202,9 @@ impl<'a> Context<'a> {
         self.loop_traps = oldt as _;
     }
     pub fn write(&mut self, op: Op) {
+        if op == Op::Pop(0) {
+            return;
+        }
         self.stack = self.stack + stack_delta(op);
 
         self.ops.push(op);
@@ -208,22 +257,34 @@ impl<'a> Context<'a> {
     }
 
     fn lookup_scope(&mut self, name: &str) -> Option<Access> {
-        for i in 0..self.scope.len() {
+        for i in (0..self.scope.len()).rev() {
             for j in 0..self.scope[i].locals.len() {
-                if self.scope[i].locals[j].name == name {
-                    if self.scope[i].locals[j].offset <= self.limit {
-                        match self.env.get(name).copied() {
-                            Some(x) => return Some(Access::Env(x)),
-                            None => {
-                                let e = self.nenv;
-                                self.nenv += 1;
-                                self.env.insert(name.to_string(), e as _);
-                                self.scope[i].locals[j].capture();
-                                return Some(Access::Env(e as _));
+                match self.scope[i].locals[j] {
+                    Var::Local(ref mut local) => {
+                        if local.name == name {
+                            if local.offset <= self.limit {
+                                match self.env.get(name).copied() {
+                                    Some(x) => return Some(Access::Env(x)),
+                                    None => {
+                                        let e = self.nenv;
+                                        self.nenv += 1;
+                                        self.env.insert(name.to_string(), e as _);
+                                        local.capture();
+                                        return Some(Access::Env(e as _));
+                                    }
+                                }
+                            } else {
+                                return Some(Access::Stack(local.offset));
                             }
                         }
-                    } else {
-                        return Some(Access::Stack(self.scope[i].locals[j].offset));
+                    }
+                    // When class has initialized fields we can have field variables in class scope
+                    Var::Field(ref field) => {
+                        if field == name {
+                            let field = field.clone();
+                            let g = self.global(Rc::new(Global::Symbol(field.into_boxed_str())));
+                            return Some(Access::FieldThis(g));
+                        }
                     }
                 }
             }
@@ -243,13 +304,17 @@ impl<'a> Context<'a> {
             Access::Env(x) => self.write(Op::AccEnv(x as _)),
             Access::Stack(l) => self.write(Op::AccStack(self.stack as i32 - l as i32)),
             Access::Global(g) => self.write(Op::AccGlobal(g as _)),
-            Access::Field(f) => self.write(Op::AccField(f as _)),
+            Access::Field(f) => self.write(Op::AccField(f as _, 0)),
             Access::This => self.write(Op::AccThis),
             Access::Index(x) => self.write(Op::AccIndex(x as _)),
             Access::Array => {
                 self.write(Op::Push);
                 self.write(Op::AccStack(2));
                 self.write(Op::AccArray);
+            }
+            Access::FieldThis(g) => {
+                self.write(Op::AccThis);
+                self.write(Op::AccField(g as _, 0));
             }
         }
     }
@@ -259,10 +324,16 @@ impl<'a> Context<'a> {
             Access::Env(x) => self.write(Op::SetEnv(x as _)),
             Access::Stack(l) => self.write(Op::SetStack(self.stack as i32 - l as i32)),
             Access::Global(g) => self.write(Op::SetGlobal(g as _)),
-            Access::Field(f) => self.write(Op::SetField(f as _)),
+            Access::Field(f) => self.write(Op::SetField(f as _, 0)),
             Access::Index(i) => self.write(Op::SetIndex(i as _)),
             Access::This => self.write(Op::SetThis),
             Access::Array => self.write(Op::SetArray),
+            Access::FieldThis(x) => {
+                self.write(Op::Push);
+                self.write(Op::AccThis);
+                self.write(Op::Swap); // swap `this` in accumulator to value on sp[0]
+                self.write(Op::SetField(x as _, 0));
+            }
         }
     }
 
@@ -292,7 +363,15 @@ impl<'a> Context<'a> {
         self.compile_access_get(&acc)
     }
 
-    pub fn add_var(&mut self, id: &str, has_val: bool) {
+    pub fn add_class_field(&mut self, id: &str) {
+        self.scope
+            .last_mut()
+            .unwrap()
+            .locals
+            .push(Var::Field(id.to_string()));
+    }
+
+    pub fn add_var(&mut self, id: &str, has_val: bool) -> Access {
         if !has_val {
             self.write(Op::AccNull);
         }
@@ -302,7 +381,8 @@ impl<'a> Context<'a> {
             .last_mut()
             .unwrap()
             .locals
-            .push(Local::new(id, self.stack));
+            .push(Var::Local(Local::new(id, self.stack)));
+        Access::Stack(self.stack)
         //self.locals.insert(id.to_string(), self.stack as _);
     }
 
@@ -316,9 +396,8 @@ impl<'a> Context<'a> {
     pub fn compile_function<R>(
         &mut self,
         params: &[Box<str>],
-        mut cb: impl FnMut(&mut Context) -> Result<R, String>,
+        cb: impl FnOnce(&mut Context) -> Result<R, String>,
     ) -> Result<R, String> {
-        let mut locals = self.locals.clone();
         let mut ctx = Context {
             g: self.g,
             ops: vec![],
@@ -331,7 +410,7 @@ impl<'a> Context<'a> {
             loop_traps: 0,
             limit: self.stack as _,
             stack: self.stack,
-            locals: &mut locals,
+
             loop_limit: self.loop_limit,
             scope: self.scope,
         };
@@ -343,7 +422,7 @@ impl<'a> Context<'a> {
                 .last_mut()
                 .unwrap()
                 .locals
-                .push(Local::new(p, ctx.stack));
+                .push(Var::Local(Local::new(p, ctx.stack)));
             //ctx.locals.insert(p.clone().to_string(), ctx.stack as _);
         }
 
@@ -460,12 +539,12 @@ impl<'a> Context<'a> {
         cb: impl FnOnce(&mut Self) -> Result<(), String>,
     ) -> Result<(Vec<Rc<Global>>, Vec<Op>), String> {
         let g = Box::leak(Box::new(Globals::default())) as *mut Globals;
-        let locals = Box::leak(Box::new(HashMap::new())) as *mut _;
+
         let scope = Box::leak(Box::new(Vec::new())) as *mut Vec<Scope>;
         let mut _ops = {
             let mut ctx = Self {
                 g: unsafe { &mut *g },
-                locals: unsafe { &mut *locals },
+
                 stack: 0,
                 loop_limit: 0,
                 loop_traps: 0,
@@ -501,7 +580,7 @@ impl<'a> Context<'a> {
         };
 
         let g = unsafe { Box::from_raw(g) };
-        let _locals = unsafe { Box::from_raw(locals) };
+
         let _ = unsafe { Box::from_raw(scope) };
         Ok((g.gtable, _ops))
     }
@@ -528,13 +607,13 @@ pub fn disassembly(globals: &[Rc<Global>], ops: &[Op]) -> String {
                 Op::AccStack(x) => write!(f, "AccStack {}", x)?,
                 Op::AccGlobal(x) => write!(f, "AccGlobal {} // {:?}", x, globals[x as usize])?,
                 Op::AccEnv(x) => write!(f, "AccEnv {}", x)?,
-                Op::AccField(x) => write!(f, "AccField {:?}", globals[x as usize])?,
+                Op::AccField(x, _) => write!(f, "AccField {:?}", globals[x as usize])?,
                 Op::AccIndex(x) => write!(f, "AccIndex {}", x)?,
                 Op::AccBuiltin(x) => write!(f, "AccBuiltin ${} // {:?}", x, globals[x as usize])?,
                 Op::SetStack(x) => write!(f, "SetStack {}", x)?,
                 Op::SetGlobal(x) => write!(f, "SetGlobal {}", x)?,
                 Op::SetEnv(x) => write!(f, "SetEnv {}", x)?,
-                Op::SetField(x) => write!(f, "SetField {:?}", globals[x as usize])?,
+                Op::SetField(x, _) => write!(f, "SetField {:?}", globals[x as usize])?,
                 Op::SetArray => write!(f, "SetArray")?,
                 Op::SetIndex(x) => write!(f, "SetIndex {}", x)?,
                 Op::Pop(x) => write!(f, "Pop {}", x)?,
@@ -556,9 +635,17 @@ pub fn disassembly(globals: &[Rc<Global>], ops: &[Op]) -> String {
     write().unwrap();
     f
 }
-
+/*
 pub fn make_module(vm: &mut VM, globals: &[Rc<Global>], ops: &[Op]) -> Gc<Module> {
     unsafe {
+        let feedback = ops
+            .iter()
+            .filter(|op| match op {
+                Op::AccField(_, _) | Op::SetField(_, _) | Op::New(_, _) | Op::Super(_, _) => true,
+                _ => false,
+            })
+            .count();
+        let fdbk = vm.gc().array(feedback, Feedback::None);
         let module = vm.gc().malloc_varsize::<Module>(ops.len() + 1, &mut []);
         let ptr = module.as_mut_ptr();
 
@@ -568,6 +655,7 @@ pub fn make_module(vm: &mut VM, globals: &[Rc<Global>], ops: &[Op]) -> Gc<Module
             exports: Value::Null,
             loader: Value::Null,
             code: [],
+            feedback: fdbk.nullable(),
             code_size: ops.len() + 1,
         });
 
@@ -582,38 +670,45 @@ pub fn make_module(vm: &mut VM, globals: &[Rc<Global>], ops: &[Op]) -> Gc<Module
                 Global::Int(x) => m.globals[i] = Value::Int(*x as i32),
                 Global::Str(x) => {
                     m.globals[i] = Value::Str(vm.gc().str(x));
-                    vm.gc().write_barrier(m.get());
+                    vm.gc().write_barrier(m.get_copy());
                 }
                 Global::Symbol(x) => {
-                    m.globals[i] = Value::Symbol(vm.intern(x));
-                    vm.gc().write_barrier(m.get());
+                    m.globals[i] = Value::Symbol(vm.gc().fixed(x.intern()));
+                    vm.gc().write_barrier(m.get_copy());
                 }
                 Global::Func(addr, nargs) => {
                     let func = vm.gc().fixed(Function {
                         nargs: *nargs as _,
                         varsize: false,
                         addr: *addr as _,
-                        module: m.get().nullable(),
+                        module: m.get_copy().nullable(),
                         env: Nullable::NULL,
                         prim: false,
+                        construct_struct: Nullable::NULL,
                     });
 
                     m.globals[i] = Value::Function(func);
-                    vm.gc().write_barrier(m.get());
+                    vm.gc().write_barrier(m.get_copy());
                 }
 
                 _ => {}
             }
         }
-        m.get()
+        m.get_copy()
     }
 }
-
-#[derive(Debug, Clone, PartialEq)]
+*/
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Local {
     name: String,
     offset: isize,
     is_captured: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum Var {
+    Local(Local),
+    Field(String),
 }
 
 impl Local {

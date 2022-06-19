@@ -53,7 +53,7 @@ pub fn do_link(
         format!("{}.waffle", module)
     };
     let ch = file_open(paths, &p)?;
-    let (ops, globals) = crate::bytecode::read_module(&ch);
+    let (ops, globals, _) = crate::bytecode::read_module(&ch);
 
     let mut funcs = vec![];
     let gtbl = globals
@@ -127,7 +127,7 @@ pub fn do_link(
     let mut p = 0;
     'link: while p < ops.len() {
         match &ops[p..] {
-            [Op::AccGlobal(str), Op::Push, Op::AccBuiltin(l), Op::Push, Op::AccBuiltin(l2), Op::Push, Op::AccField(f), Op::ObjCall(2), ..]
+            [Op::AccGlobal(str), Op::Push, Op::AccBuiltin(l), Op::Push, Op::AccBuiltin(l2), Op::Push, Op::AccField(f, _), Op::ObjCall(2), ..]
                 if {
                     matches!(*globals[*str as usize], Global::Str(_))
                         && *globals[*l as usize] == load
@@ -170,11 +170,13 @@ pub fn do_link(
                     Op::SetGlobal(g) => {
                         ctx.opcodes.push(Op::SetGlobal(gtbl[g as usize] as _));
                     }
-                    Op::SetField(g) => {
-                        ctx.opcodes.push(Op::SetField(gtbl[g as usize] as _));
+                    Op::SetField(g, _) => {
+                        ctx.opcodes
+                            .push(Op::SetField(gtbl[g as usize] as _, u32::MAX));
                     }
-                    Op::AccField(g) => {
-                        ctx.opcodes.push(Op::AccField(gtbl[g as usize] as _));
+                    Op::AccField(g, _) => {
+                        ctx.opcodes
+                            .push(Op::AccField(gtbl[g as usize] as _, u32::MAX));
                     }
                     Op::Jump(i) => jump(ctx, Op::Jump, p, i),
                     Op::JumpIf(i) => jump(ctx, Op::JumpIf, p, i),

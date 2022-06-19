@@ -1,8 +1,10 @@
 use crate::{
     gc_frame,
     memory::gcwrapper::{Array, Gc, Nullable, Str},
-    value::{ByteBuffer, Cell, Function, Obj, Sym, Value},
-    vm::VM,
+    object::Object,
+    value::{ByteBuffer, Function, Value},
+    vm::Symbol,
+    vm::{Internable, VM},
 };
 
 pub static BUILTINS: [usize; 0] = [];
@@ -15,6 +17,7 @@ pub fn make_prim(vm: &mut VM, f: usize, nargs: usize, var: bool) -> Value {
         env: Nullable::NULL,
         module: Nullable::NULL,
         prim: true,
+        construct_struct: Nullable::NULL,
     };
 
     Value::Primitive(vm.gc().fixed(prim))
@@ -33,6 +36,15 @@ pub fn builtin_array(vm: &mut VM, args: &[Value]) -> Value {
 pub extern "C" fn builtin_amake(vm: &mut VM, size: &Value) -> Value {
     let s = size.int();
     Value::Array(vm.gc().array(s as _, Value::Null))
+}
+
+pub extern "C" fn builtin_amake2(vm: &mut VM, size: &Value, init: &Value) -> Value {
+    let s = size.int();
+    let mut arr = vm.gc().array(s as _, Value::Null);
+    for i in 0..s as usize {
+        arr[i] = *init;
+    }
+    Value::Array(arr)
 }
 
 pub extern "C" fn builtin_asize(vm: &mut VM, a: &Value) -> Value {
@@ -86,12 +98,7 @@ pub extern "C" fn builtin_new(vm: &mut VM, val: &Value) -> Value {
         ));
     }
 
-    match val {
-        proto if proto.is_obj() => {
-            Value::Object(Obj::with_proto(vm, proto.downcast_ref().unwrap()))
-        }
-        _ => Value::Object(Obj::new(vm)),
-    }
+    Value::Object(Object::new_empty(vm))
 }
 
 /// $symbol: str | sym -> sym
@@ -103,11 +110,11 @@ pub extern "C" fn builtin_symbol(vm: &mut VM, val: &Value) -> Value {
         Value::Str(x) => Value::Symbol(vm.intern(&***x)),
         _ => vm.throw_str("`symbol` expects string as argument"),
     }*/
-    if let Some(sym) = val.downcast_ref::<Sym>() {
+    if let Some(sym) = val.downcast_ref::<Symbol>() {
         Value::Symbol(sym)
     } else if let Some(mut str) = val.downcast_ref::<Str>() {
         gc_frame!(vm.gc().roots() => str: Gc<Str>);
-        Value::Symbol(vm.intern(&***str))
+        Value::Symbol(vm.gc().fixed(str.intern()))
     } else {
         vm.throw_str("`symbol` expects string as argument")
     }
@@ -138,9 +145,9 @@ pub extern "C" fn builtin_ofields(vm: &mut VM, obj: &Value) -> Value {
         }
         _ => vm.throw_str("ofields expects object"),
     }*/
-    if let Some(mut object) = obj.downcast_ref::<Obj>() {
-        gc_frame!(vm.gc().roots() => object: Gc<Obj>);
-        let mut arr = vm.gc().array(object.table.count, Value::Null);
+    if let Some(mut object) = obj.downcast_ref::<Object>() {
+        gc_frame!(vm.gc().roots() => object: Gc<Object>);
+        /*let mut arr = vm.gc().array(object.table.count, Value::Null);
 
         gc_frame!(vm.gc().roots() => arr: Gc<Array<Value>>);
         let mut c = 0;
@@ -149,15 +156,31 @@ pub extern "C" fn builtin_ofields(vm: &mut VM, obj: &Value) -> Value {
             gc_frame!(vm.gc().roots() => cell: Nullable<Cell>);
             while cell.is_not_null() {
                 let mut farr = vm.gc().array(2, Value::Null);
-                farr[0] = cell.key;
+                farr[0] = Value::Symbol(vm.gc().fixed(cell.key));
                 farr[1] = (**cell).value;
                 arr[c] = Value::Array(farr);
                 c += 1;
                 vm.gc().write_barrier(*arr);
                 cell.set(cell.next);
             }
-        }
+        }*/
+        let mut syms = vec![];
+        object.get_own_property_names(
+            vm,
+            &mut |sym, _| {
+                syms.push(sym);
+            },
+            crate::object::EnumerationMode::Default,
+        );
+        gc_frame!(vm.gc().roots() => arr = vm.gc().array(syms.len(),Value::encode_null_value()));
 
+        for (i, sym) in syms.iter().copied().enumerate() {
+            gc_frame!(vm.gc().roots() => tmp = object.get(vm,sym), sym = vm.gc().fixed(sym));
+            let mut ary = vm.gc().array(2, Value::Null);
+            ary[1] = tmp.get_copy();
+            ary[0] = Value::Symbol(sym.get_copy());
+            arr[i] = Value::encode_object_value(ary);
+        }
         Value::Array(*arr)
     } else {
         vm.throw_str("ofields expects objects")
@@ -169,10 +192,23 @@ pub extern "C" fn builtin_string(vm: &mut VM, x: &Value) -> Value {
     Value::Str(vm.gc().str(x))
 }
 
+pub extern "C" fn builtin_string_get(vm: &mut VM, str: &Value, ix: &Value) -> Value {
+    let str = vm.expect_str(str);
+    let ix = vm.expect_int(ix) as usize;
+    if ix > str.len() {
+        return Value::Null;
+    }
+    Value::Str(vm.gc().str((str.as_bytes()[ix] as char).to_string()))
+}
+
 pub extern "C" fn builtin_string_concat(vm: &mut VM, x: &Value, y: &Value) -> Value {
     let x = x.to_string();
     let y = y.to_string();
     Value::Str(vm.gc().str(format!("{}{}", x, y)))
+}
+
+pub extern "C" fn builtin_string_length(vm: &mut VM, x: &Value) -> Value {
+    Value::Int(vm.expect_str(x).len() as _)
 }
 
 pub extern "C" fn builtin_print(_: &mut VM, x: &Value) -> Value {
@@ -388,7 +424,7 @@ pub extern "C" fn ffi_attach_pointer(vm: &mut VM, lib: &Value, name: &Value) -> 
     raw_ptr
 }
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Read only
@@ -498,157 +534,172 @@ pub extern "C" fn file_flush(vm: &mut VM, file: &Value) -> Value {
 }
 
 pub(crate) fn init_builtin(vm: &mut VM) {
-    let mut obj = Obj::with_capacity(vm, 128); // we do not want to relocate this table, less garbage to cleanup
+    let mut obj = Object::new_empty(vm); // we do not want to relocate this table, less garbage to cleanup
 
-    gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
+    gc_frame!(vm.gc().roots() => obj: Gc<Object>);
 
-    let mut f = make_prim(vm, builtin_acopy as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("acopy"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    let f = make_prim(vm, builtin_acopy as _, 1, false);
+    let s = "acopy".intern();
 
-    let mut f = make_prim(vm, builtin_amake as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("amake"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
 
-    let mut f = make_prim(vm, builtin_array as _, 0, true);
-    let mut s = Value::Symbol(vm.intern("array"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    let f = make_prim(vm, builtin_amake as _, 1, false);
+    let s = "amake".intern();
 
-    let mut f = make_prim(vm, builtin_asize as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("asize"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
 
-    let mut f = make_prim(vm, builtin_full_gc as _, 0, false);
-    let mut s = Value::Symbol(vm.intern("fullGC"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    let f = make_prim(vm, builtin_amake2 as _, 2, false);
+    let s = "amake2".intern();
 
-    let mut f = make_prim(vm, builtin_minor_gc as _, 0, false);
-    let mut s = Value::Symbol(vm.intern("minorGC"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
-    let mut f = make_prim(vm, builtin_throw as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("throw"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
 
-    let mut f = make_prim(vm, builtin_new as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("new"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    let f = make_prim(vm, builtin_array as _, 0, true);
+    let s = "array".intern();
 
-    let mut f = make_prim(vm, builtin_symbol as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("symbol"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
 
-    let mut f = make_prim(vm, builtin_ofields as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("ofields"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    let f = make_prim(vm, builtin_asize as _, 1, false);
+    let s = "asize".intern();
 
-    let mut f = make_prim(vm, builtin_string as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("string"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
-    let mut f = make_prim(vm, builtin_string_concat as _, 2, false);
-    let mut s = Value::Symbol(vm.intern("string_concat"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
 
-    let mut f = make_prim(vm, builtin_print as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("print"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    let f = make_prim(vm, builtin_full_gc as _, 0, false);
+    let s = "fullGC".intern();
 
-    let mut f = make_prim(vm, builtin_bmake as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("bmake"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
 
-    let mut f = make_prim(vm, builtin_bcopy as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("bcopy"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    let f = make_prim(vm, builtin_minor_gc as _, 0, false);
+    let s = "minorGC".intern();
 
-    let mut f = make_prim(vm, builtin_bget as _, 2, false);
-    let mut s = Value::Symbol(vm.intern("bget"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
+    let f = make_prim(vm, builtin_throw as _, 1, false);
+    let s = "throw".intern();
 
-    let mut f = make_prim(vm, builtin_bset as _, 3, false);
-    let mut s = Value::Symbol(vm.intern("bset"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
 
-    let mut f = make_prim(vm, builtin_bsize as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("bsize"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    let f = make_prim(vm, builtin_new as _, 1, false);
+    let s = "new".intern();
 
-    let mut f = make_prim(vm, builtin_bstr as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("bstr"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
 
-    let mut f = make_prim(vm, builtin_typename as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("typename"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    let f = make_prim(vm, builtin_symbol as _, 1, false);
+    let s = "symbol".intern();
 
-    let mut f = make_prim(vm, ffi_open as _, 0, true);
-    let mut s = Value::Symbol(vm.intern("ffi_open"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
 
-    let mut f = make_prim(vm, ffi_attach as _, 4, false);
-    let mut s = Value::Symbol(vm.intern("ffi_attach"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    let f = make_prim(vm, builtin_ofields as _, 1, false);
+    let s = "ofields".intern();
 
-    let mut f = make_prim(vm, ffi_call as _, 2, false);
-    let mut s = Value::Symbol(vm.intern("ffi_call"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
 
-    let mut f = make_prim(vm, ffi_attach_pointer as _, 2, false);
-    let mut s = Value::Symbol(vm.intern("ffi_attach_pointer"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    let f = make_prim(vm, builtin_string as _, 1, false);
+    let s = "string".intern();
 
-    let mut f = make_prim(vm, file_open as _, 2, false);
-    let mut s = Value::Symbol(vm.intern("file_open"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
+    let f = make_prim(vm, builtin_string_concat as _, 2, false);
+    let s = "string_concat".intern();
 
-    let mut f = make_prim(vm, file_read as _, 2, false);
-    let mut s = Value::Symbol(vm.intern("file_read"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
 
-    let mut f = make_prim(vm, file_read_to_end as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("file_read_to_end"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    let f = make_prim(vm, builtin_print as _, 1, false);
+    let s = "print".intern();
 
-    let mut f = make_prim(vm, file_write as _, 2, false);
-    let mut s = Value::Symbol(vm.intern("file_write"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
 
-    let mut f = make_prim(vm, file_write_all as _, 2, false);
-    let mut s = Value::Symbol(vm.intern("file_write_all"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    let f = make_prim(vm, builtin_bmake as _, 1, false);
+    let s = "bmake".intern();
 
-    let mut f = make_prim(vm, file_flush as _, 1, false);
-    let mut s = Value::Symbol(vm.intern("file_flush"));
-    gc_frame!(vm.gc().roots() => f: Value,s: Value);
-    obj.insert(vm, &s, &f);
+    obj.put(vm, s, f, false);
 
-    vm.builtins = Value::Object(obj.get());
+    let f = make_prim(vm, builtin_bcopy as _, 1, false);
+    let s = "bcopy".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, builtin_bget as _, 2, false);
+    let s = "bget".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, builtin_bset as _, 3, false);
+    let s = "bset".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, builtin_bsize as _, 1, false);
+    let s = "bsize".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, builtin_bstr as _, 1, false);
+    let s = "bstr".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, builtin_typename as _, 1, false);
+    let s = "typename".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, ffi_open as _, 0, true);
+    let s = "ffi_open".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, ffi_attach as _, 4, false);
+    let s = "ffi_attach".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, ffi_call as _, 2, false);
+    let s = "ffi_call".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, ffi_attach_pointer as _, 2, false);
+    let s = "ffi_attach_pointer".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, file_open as _, 2, false);
+    let s = "file_open".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, file_read as _, 2, false);
+    let s = "file_read".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, file_read_to_end as _, 1, false);
+    let s = "file_read_to_end".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, file_write as _, 2, false);
+    let s = "file_write".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, file_write_all as _, 2, false);
+    let s = "file_write_all".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, file_flush as _, 1, false);
+    let s = "file_flush".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, builtin_string_get as _, 2, false);
+    let s = "string_get".intern();
+
+    obj.put(vm, s, f, false);
+
+    let f = make_prim(vm, builtin_string_length as _, 1, false);
+    let s = "string_length".intern();
+
+    obj.put(vm, s, f, false);
+
+    vm.builtins = Value::Object(obj.get_copy());
 }

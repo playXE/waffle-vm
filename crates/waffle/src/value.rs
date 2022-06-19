@@ -1,20 +1,22 @@
+pub use super::function::Function;
 use core::fmt;
+use fxhash::FxHasher64;
+use memoffset::offset_of;
 use std::{
     hash::{Hash, Hasher},
     ops::{Deref, DerefMut, Index, IndexMut},
 };
 
-use fxhash::FxHasher64;
-use memoffset::offset_of;
-
 use crate::{
-    gc_frame,
+    ffi, gc_frame,
     memory::{
         gcwrapper::{Array, Gc, Nullable, Str},
-        Allocation, Finalize, Object, Trace, Visitor,
+        Allocation, Finalize, Managed, Trace, Visitor,
     },
-    opcode::Op,
-    vm::VM, ffi,
+    object::{Hint, Object},
+    opcode::{Feedback, Op},
+    vm::{symbol_table, Symbol},
+    vm::{Internable, VM},
 };
 
 #[cfg(feature = "small-float")]
@@ -42,40 +44,8 @@ pub enum Value {
 }*/
 pub use nanbox::*;
 
-pub struct Sym {
-    pub(crate) next: Option<Gc<Sym>>,
-    pub(crate) name: Gc<Str>,
-}
-
-impl Object for Sym {}
-unsafe impl Trace for Sym {
-    fn trace(&mut self, visitor: &mut dyn Visitor) {
-        self.next.trace(visitor);
-        self.name.trace(visitor);
-    }
-}
-unsafe impl Finalize for Sym {}
-unsafe impl Allocation for Sym {
-    const CELL_TYPE: crate::CellType = crate::CellType::Symbol;
-}
-
 impl Value {
     pub fn tag(&self) -> usize {
-        /*  match self {
-            Null => 0,
-            Bool(_) => 1,
-            Int(_) => 2,
-            Float(_) => 3,
-            Str(_) => 4,
-            Array(_) => 5,
-            Abstract(_) => 6,
-            Module(_) => 7,
-            Function(_) => 8,
-            Primitive(_) => 9,
-            Object(_) => 10,
-            Table(_) => 11,
-            Symbol(_) => 12,
-        }*/
         if self.is_null() {
             0
         } else if self.is_bool() {
@@ -92,7 +62,7 @@ impl Value {
             6
         } else if self.is_function() {
             7
-        } else if self.is_primitive() {
+        } else if self.is_native() {
             8
         } else if self.is_obj() {
             9
@@ -103,30 +73,24 @@ impl Value {
         } else if self.downcast_ref::<ByteBuffer>().is_some() {
             13
         } else if self.downcast_ref::<ffi::Library>().is_some() {
-            14 
+            14
         } else if self.downcast_ref::<ffi::Function>().is_some() {
-            15 
+            15
         } else if self.downcast_ref::<ffi::Pointer>().is_some() {
             16
         } else {
             12
         }
     }
-    pub fn field(&self, vm: &mut VM, key: &Value) -> Value {
-        if let Some(obj) = self.downcast_ref::<Obj>() {
-            obj.field(vm, key)
-        } else {
-            vm.throw_str("not an object");
-        }
-    }
-    pub fn set_field(&mut self, vm: &mut VM, key: &Value, value: &Value) {
-        if let Some(mut obj) = self.downcast_ref::<Obj>() {
-            gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
+    pub fn field(&self, vm: &mut VM, key: Symbol) -> Value {
+        gc_frame!(vm.gc().roots() => object = self.to_object(vm));
 
-            obj.insert(vm, key, value)
-        } else {
-            vm.throw_str("not an object");
-        }
+        object.get(vm, key)
+    }
+    pub fn set_field(&mut self, vm: &mut VM, key: Symbol, value: Value) {
+        gc_frame!(vm.gc().roots() => object = self.to_object(vm));
+
+        object.put(vm, key, value, false)
     }
     pub fn int(self) -> i32 {
         self.get_int32()
@@ -200,16 +164,7 @@ impl Value {
 }
 
 unsafe impl Finalize for Value {}
-impl Object for Value {}
-
-pub struct Function {
-    pub nargs: u32,
-    pub varsize: bool,
-    pub env: Nullable<Array<Nullable<Upvalue>>>,
-    pub addr: usize,
-    pub prim: bool,
-    pub module: Nullable<Module>,
-}
+impl Managed for Value {}
 
 pub struct Upvalue {
     pub next: Nullable<Self>,
@@ -233,19 +188,6 @@ unsafe impl Trace for Upvalue {
     }
 }
 
-unsafe impl Finalize for Upvalue {}
-unsafe impl Allocation for Upvalue {}
-impl Object for Upvalue {}
-unsafe impl Trace for Function {
-    fn trace(&mut self, vis: &mut dyn Visitor) {
-        self.env.trace(vis);
-        self.module.trace(vis);
-    }
-}
-
-unsafe impl Finalize for Function {}
-impl Object for Function {}
-
 #[repr(C)]
 pub struct Module {
     pub name: Value,
@@ -253,6 +195,7 @@ pub struct Module {
     pub exports: Value,
     pub loader: Value,
     pub code_size: usize,
+    pub feedback: Nullable<Array<Feedback>>,
     pub code: [Op; 0],
 }
 unsafe impl Allocation for Module {
@@ -269,7 +212,7 @@ unsafe impl Trace for Module {
         self.globals.trace(vis);
         self.exports.trace(vis);
         self.loader.trace(vis);
-
+        self.feedback.trace(vis);
         for i in 0..self.code_size {
             if let Op::AccBuiltinResolved(ref mut val) = self[i] {
                 val.trace(vis);
@@ -278,7 +221,7 @@ unsafe impl Trace for Module {
     }
 }
 unsafe impl Finalize for Module {}
-impl Object for Module {}
+impl Managed for Module {}
 
 /// key-value pair
 pub struct Table {
@@ -299,9 +242,9 @@ impl Table {
 impl Gc<Table> {
     fn resize(&mut self, vm: &mut VM) {
         let size = self.cells.len() * 2;
+        let tmp = vm.gc().array(size, Nullable::NULL);
         let prev = self.cells;
-        self.cells = vm.gc().array(size, Nullable::NULL);
-
+        self.cells = tmp;
         let mut node;
         let mut next;
 
@@ -318,39 +261,40 @@ impl Gc<Table> {
         vm.gc().write_barrier(*self);
     }
 
-    pub fn insert(&mut self, vm: &mut VM, key: &Value, value: &Value) -> bool {
-        let hash = value_hash(vm, key).int() as u64;
-
+    pub fn insert(&mut self, vm: &mut VM, key: Symbol, value: &Value) -> bool {
+        let mut state = FxHasher64::default();
+        key.hash(&mut state);
+        let hash = state.finish();
         let position = (hash % self.cells.len() as u64) as usize;
         let mut node = self.cells[position];
         while node.is_not_null() {
-            if node.hash == hash && value_eq(vm, &node.key, key).bool() {
+            if node.hash == hash && node.key == key {
                 node.value = *value;
                 vm.gc().write_barrier(*self);
                 return false;
             }
             node = node.next;
         }
-        self.insert_slow(vm, *key, *value, hash, position);
+        self.insert_slow(vm, key, *value, hash, position);
         true
     }
 
     fn insert_slow(
         &mut self,
         vm: &mut VM,
-        mut key: Value,
+        key: Symbol,
         mut value: Value,
         hash: u64,
         mut pos: usize,
     ) {
-        gc_frame!(vm.gc().roots() => key: Value,value: Value);
+        gc_frame!(vm.gc().roots() => value: Value);
         if self.count >= (self.cells.len() as f64 * 0.75) as usize {
             self.resize(vm);
             pos = (hash % self.cells.len() as u64) as usize;
         }
         unsafe {
             let node = vm.gc().fixed(Cell {
-                key: *key.as_ref(),
+                key,
                 value: *value.as_ref(),
                 hash,
                 next: *self.cells.get_unchecked(pos),
@@ -360,14 +304,16 @@ impl Gc<Table> {
             vm.gc().write_barrier(*self);
         }
     }
-    pub fn remove(&mut self, vm: &mut VM, key: &Value) -> bool {
-        let hash = value_hash(vm, key).int() as u64;
+    pub fn remove(&mut self, _vm: &mut VM, key: Symbol) -> bool {
+        let mut state = FxHasher64::default();
+        key.hash(&mut state);
+        let hash = state.finish();
 
         let position = (hash % self.cells.len() as u64) as usize;
         let mut node = self.cells[position];
         let mut prevnode = Nullable::<Cell>::NULL;
         while node.is_not_null() {
-            if node.hash == hash && value_eq(vm, &node.key, key).bool() {
+            if node.hash == hash && node.key == key {
                 if prevnode.is_not_null() {
                     prevnode.next = node.next;
                 } else {
@@ -382,15 +328,17 @@ impl Gc<Table> {
         false
     }
 
-    pub fn lookup(&self, vm: &mut VM, key: &Value, found: &mut bool) -> Value {
-        let hash = value_hash(vm, key).int() as u64;
+    pub fn lookup(&self, _vm: &mut VM, key: Symbol, found: &mut bool) -> Value {
+        let mut state = FxHasher64::default();
+        key.hash(&mut state);
+        let hash = state.finish();
 
         let position = (hash % self.cells.len() as u64) as usize;
         let mut node = self.cells[position];
 
         while node.is_not_null() {
             //     println!("try {:x} {:x} {} {}", hash, node.hash, node.key, key);
-            if node.hash == hash && value_eq(vm, &node.key, key).bool() {
+            if node.hash == hash && node.key == key {
                 //    println!("found?");
                 *found = true;
                 return node.value;
@@ -409,7 +357,7 @@ impl Gc<Table> {
             let mut node = from.cells[i];
             gc_frame!(vm.gc().roots() => node: Nullable<Cell>);
             while node.is_not_null() {
-                self.insert(vm, &node.key, &(**node).value);
+                self.insert(vm, node.key, &(**node).value);
                 *node = node.next;
             }
         }
@@ -431,10 +379,10 @@ unsafe impl Trace for Table {
     }
 }
 unsafe impl Finalize for Table {}
-impl Object for Table {}
+impl Managed for Table {}
 
 pub struct Cell {
-    pub(crate) key: Value,
+    pub(crate) key: Symbol,
     pub(crate) value: Value,
     pub(crate) hash: u64,
     pub(crate) next: Nullable<Cell>,
@@ -449,7 +397,7 @@ unsafe impl Trace for Cell {
 }
 
 unsafe impl Finalize for Cell {}
-impl Object for Cell {}
+impl Managed for Cell {}
 
 pub fn value_hash(vm: &mut VM, value: &Value) -> Value {
     let mut hasher = FxHasher64::default();
@@ -529,6 +477,9 @@ pub fn value_hash(vm: &mut VM, value: &Value) -> Value {
     } else if let Some(str) = value.downcast_ref::<Str>() {
         4i64.hash(&mut hasher);
         (**str).hash(&mut hasher);
+    } else if let Some(sym) = value.downcast_ref::<Symbol>() {
+        6i64.hash(&mut hasher);
+        (*sym).hash(&mut hasher);
     } else {
         let x = value.get_object();
         let id = vm.gc().identity(x);
@@ -648,16 +599,17 @@ pub fn value_cmp(vm: &mut VM, a: &Value, b: &Value) -> Value {
         fcmp(a.get_double(), b.get_int32() as _)
     } else if let (Some(a), Some(b)) = (a.downcast_ref::<Str>(), b.downcast_ref::<Str>()) {
         scmp(&**a, &**b)
-    } else if let (Some(a), Some(b)) = (a.downcast_ref::<Obj>(), b.downcast_ref::<Obj>()) {
+    } else if let (Some(a), Some(b)) = (a.downcast_ref::<Object>(), b.downcast_ref::<Object>()) {
         if vm.identity_cmp(a, b) == 0 {
             0
         } else {
-            let s = vm.intern("__compare");
-            let tmp = a.field(vm, &Value::Symbol(s));
+            gc_frame!(vm.gc().roots() => a = a);
+            let s = "__compare".intern();
+            let tmp = a.get(vm, s);
             if !tmp.is_function() {
                 INVALID_CMP
             } else {
-                let a = vm.call2(tmp, Value::Object(a), Value::Object(b));
+                let a = vm.call2(tmp, Value::Object(a.get_copy()), Value::Object(b));
                 if a.is_int32() {
                     a.get_int32()
                 } else {
@@ -665,18 +617,27 @@ pub fn value_cmp(vm: &mut VM, a: &Value, b: &Value) -> Value {
                 }
             }
         }
-    } else if let Some(a) = a.downcast_ref::<Obj>() {
-        let s = vm.intern("__compare");
-        let tmp = a.field(vm, &Value::Symbol(s));
+    } else if let Some(a) = a.downcast_ref::<Object>() {
+        gc_frame!(vm.gc().roots() => a = a);
+        let s = "__compare".intern();
+        let tmp = a.get(vm, s);
         if !tmp.is_function() {
             INVALID_CMP
         } else {
-            let a = vm.call2(tmp, Value::Object(a), *b);
+            let a = vm.call2(tmp, Value::Object(a.get_copy()), *b);
             if a.is_int32() {
                 a.get_int32()
             } else {
                 INVALID_CMP
             }
+        }
+    } else if a.is_symbol() && b.is_symbol() {
+        let a = a.downcast_ref::<Symbol>().unwrap();
+        let b = b.downcast_ref::<Symbol>().unwrap();
+        if *a == *b {
+            0
+        } else {
+            INVALID_CMP
         }
     } else if a.is_object() && b.is_object() {
         vm.identity_cmp(a.get_object(), b.get_object())
@@ -684,68 +645,6 @@ pub fn value_cmp(vm: &mut VM, a: &Value, b: &Value) -> Value {
         INVALID_CMP
     })
 }
-
-pub struct Obj {
-    pub(crate) table: Gc<Table>,
-    proto: Option<Gc<Self>>,
-}
-
-impl Obj {
-    pub fn with_proto(vm: &mut VM, mut proto: Gc<Obj>) -> Gc<Obj> {
-        let mut this = Nullable::NULL;
-        gc_frame!(vm.gc().roots() => proto: Gc<Obj>,this: Nullable<Obj>);
-        *this = Obj::with_capacity(vm, proto.table.count).nullable();
-
-        this.proto = Some(proto.get());
-        this.table.copy(vm, proto.table);
-
-        this.as_gc()
-    }
-    pub fn new(vm: &mut VM) -> Gc<Obj> {
-        let table = Table::new(vm, 2);
-        vm.gc().fixed(Obj { table, proto: None })
-    }
-    pub fn with_capacity(vm: &mut VM, cap: usize) -> Gc<Obj> {
-        let table = Table::new(vm, cap);
-        vm.gc().fixed(Obj { table, proto: None })
-    }
-}
-
-impl Gc<Obj> {
-    pub fn field(&self, vm: &mut VM, field: &Value) -> Value {
-        let mut o = Some(*self);
-
-        gc_frame!(vm.gc().roots() => o: Option<Gc<Obj>>);
-        while let Some(mut obj) = o.get() {
-            let mut found = false;
-            gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
-            let f = obj.as_ref().table.lookup(vm, field, &mut found);
-            if found {
-                return f;
-            }
-
-            o.set(obj.as_ref().proto);
-        }
-        Value::Null
-    }
-
-    pub fn insert(&mut self, vm: &mut VM, key: &Value, val: &Value) {
-        self.table.insert(vm, key, val);
-        vm.gc().write_barrier(*self);
-    }
-}
-
-unsafe impl Trace for Obj {
-    fn trace(&mut self, vis: &mut dyn Visitor) {
-        self.table.trace(vis);
-        self.proto.trace(vis);
-    }
-}
-unsafe impl Finalize for Obj {}
-unsafe impl Allocation for Obj {
-    const CELL_TYPE: crate::CellType = crate::CellType::Object;
-}
-impl Object for Obj {}
 
 impl Index<usize> for Module {
     type Output = Op;
@@ -771,18 +670,22 @@ impl fmt::Display for Value {
             write!(f, "{}", self.get_bool())
         } else if let Some(x) = self.downcast_ref::<Str>() {
             write!(f, "{}", &**x)
-        } else if let Some(x) = self.downcast_ref::<Sym>() {
-            write!(f, "\"{}\"", &**x.name)
+        } else if let Some(x) = self.downcast_ref::<Symbol>() {
+            write!(f, "{}", x.description(symbol_table()))
         } else if let Some(x) = self.downcast_ref::<Function>() {
             if x.prim {
                 write!(f, "<primitive {:p}>", x)
             } else {
                 write!(f, "<function {:p}>", x)
             }
-        } else if let Some(x) = self.downcast_ref::<Obj>() {
-            write!(f, "<object {:p}>", x)
+        } else if let Some(x) = self.downcast_ref::<Object>() {
+            write!(f, "<object {} : {:p}>", x.class().name, x)
         } else if let Some(x) = self.downcast_ref::<Array<Value>>() {
             write!(f, "<array {:p}: {}>", x, x.len())
+        } else if self.is_empty() {
+            write!(f, "empty")
+        } else if self.is_undefined() {
+            write!(f, "undefined")
         } else {
             assert!(self.is_object());
             write!(f, "<abstract {:p}>", self.get_object())
@@ -815,16 +718,16 @@ impl fmt::Debug for Value {
             write!(f, "{}", self.get_bool())
         } else if let Some(x) = self.downcast_ref::<Str>() {
             write!(f, "{}", &**x)
-        } else if let Some(x) = self.downcast_ref::<Sym>() {
-            write!(f, "\"{}\"", &**x.name)
+        } else if let Some(x) = self.downcast_ref::<Symbol>() {
+            write!(f, "{}", x.description(symbol_table()))
         } else if let Some(x) = self.downcast_ref::<Function>() {
             if x.prim {
                 write!(f, "<primitive {:p}>", x)
             } else {
                 write!(f, "<function {:p}>", x)
             }
-        } else if let Some(x) = self.downcast_ref::<Obj>() {
-            write!(f, "<object {:p}>", x)
+        } else if let Some(x) = self.downcast_ref::<Object>() {
+            write!(f, "<object {} : {:p}>", x.class().name, x)
         } else if let Some(x) = self.downcast_ref::<Array<Value>>() {
             write!(f, "<array {:p}: {}>", x, x.len())
         } else {
@@ -837,10 +740,11 @@ impl fmt::Debug for Value {
 pub mod nanbox {
     use crate::memory::{
         gcwrapper::{Array, Gc, Str},
-        Object, Trace,
+        Managed, Trace,
     };
 
-    use super::{purenan::*, Function, Module, Obj, Sym, Table};
+    use super::{purenan::*, Function, Module, Symbol, Table};
+    use crate::object::*;
     #[derive(Copy, Clone)]
     #[repr(C)]
     pub struct Value(pub(crate) EncodedValueDescriptor);
@@ -989,7 +893,7 @@ pub mod nanbox {
             })
         }
         #[inline]
-        pub fn encode_object_value<T: Object + ?Sized>(gc: Gc<T>) -> Self {
+        pub fn encode_object_value<T: Managed + ?Sized>(gc: Gc<T>) -> Self {
             Self(EncodedValueDescriptor {
                 ptr: unsafe { std::mem::transmute(gc) },
             })
@@ -1066,7 +970,7 @@ pub mod nanbox {
         }
 
         #[inline]
-        pub fn get_object(self) -> Gc<dyn Object> {
+        pub fn get_object(self) -> Gc<dyn Managed> {
             assert!(self.is_object());
 
             unsafe { std::mem::transmute(self.0.ptr) }
@@ -1164,7 +1068,7 @@ pub mod nanbox {
         pub fn Float(x: f64) -> Self {
             Self::encode_f64_value(x)
         }
-        pub fn Object(x: Gc<Obj>) -> Self {
+        pub fn Object(x: Gc<Object>) -> Self {
             Self::encode_object_value(x)
         }
 
@@ -1172,7 +1076,7 @@ pub mod nanbox {
             Self::encode_object_value(x)
         }
 
-        pub fn Symbol(x: Gc<Sym>) -> Self {
+        pub fn Symbol(x: Gc<Symbol>) -> Self {
             Self::encode_object_value(x)
         }
 
@@ -1180,7 +1084,7 @@ pub mod nanbox {
             Self::encode_object_value(x)
         }
 
-        pub fn Abstract(x: Gc<dyn Object>) -> Self {
+        pub fn Abstract(x: Gc<dyn Managed>) -> Self {
             Self::encode_object_value(x)
         }
 
@@ -1200,7 +1104,7 @@ pub mod nanbox {
             Self::encode_object_value(x)
         }
 
-        pub fn downcast_ref<T: 'static + Object>(self) -> Option<Gc<T>> {
+        pub fn downcast_ref<T: 'static + Managed>(self) -> Option<Gc<T>> {
             if self.is_object() {
                 self.get_object().downcast()
             } else {
@@ -1212,14 +1116,19 @@ pub mod nanbox {
             self.downcast_ref::<Function>().is_some()
         }
 
-        pub fn is_primitive(self) -> bool {
+        pub fn is_native(self) -> bool {
             match self.downcast_ref::<Function>() {
                 Some(x) => x.prim,
                 _ => false,
             }
         }
+
+        pub fn is_primitive(self) -> bool {
+            self.is_number() || self.is_bool() || self.is_str() || self.is_symbol()
+        }
+
         pub fn is_obj(self) -> bool {
-            self.downcast_ref::<Obj>().is_some()
+            self.downcast_ref::<Object>().is_some()
         }
         pub fn is_table(self) -> bool {
             self.downcast_ref::<Table>().is_some()
@@ -1229,7 +1138,7 @@ pub mod nanbox {
             self.downcast_ref::<Array<Value>>().is_some()
         }
         pub fn is_symbol(self) -> bool {
-            self.downcast_ref::<Sym>().is_some()
+            self.downcast_ref::<Symbol>().is_some()
         }
 
         pub fn is_str(self) -> bool {
@@ -1322,7 +1231,7 @@ unsafe impl Allocation for ByteBuffer {
     const VARSIZE_OFFSETOF_VARPART: usize = offset_of!(Self, data);
 }
 
-impl Object for ByteBuffer {}
+impl Managed for ByteBuffer {}
 
 impl Index<usize> for ByteBuffer {
     type Output = u8;
@@ -1349,5 +1258,111 @@ impl Deref for ByteBuffer {
 impl DerefMut for ByteBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { std::slice::from_raw_parts_mut(self.data.as_mut_ptr(), self.len) }
+    }
+}
+
+impl Value {
+    pub fn to_primitive(self, vm: &mut VM, hint: Hint) -> Value {
+        if let Some(object) = self.downcast_ref::<Object>() {
+            gc_frame!(vm.gc().roots() => object = object);
+            object.to_primitive(vm, hint)
+        } else {
+            self
+        }
+    }
+    pub fn to_symbol(&self, _vm: &mut VM) -> Symbol {
+        if let Some(sym) = self.downcast_ref::<Symbol>() {
+            return *sym;
+        }
+
+        if self.is_number() {
+            let n = self.get_number();
+            if n as u32 as f64 == n {
+                return Symbol::Index(n as _);
+            }
+            return n.to_string().intern();
+        }
+
+        if let Some(str) = self.downcast_ref::<Str>() {
+            return str.intern();
+        }
+
+        if self.is_bool() {
+            if self.get_bool() {
+                return "true".intern();
+            } else {
+                return "false".intern();
+            }
+        }
+
+        if self.is_undefined() {
+            return "undefined".intern();
+        }
+
+        todo!()
+    }
+
+    #[inline]
+    pub unsafe fn fill(start: *mut Self, end: *mut Self, fill: Value) {
+        let mut cur = start;
+        while cur != end {
+            cur.write(fill);
+            cur = cur.add(1);
+        }
+    }
+
+    #[inline]
+    pub unsafe fn uninit_copy(
+        mut first: *mut Self,
+        last: *mut Self,
+        mut result: *mut Value,
+    ) -> *mut Value {
+        while first != last {
+            result.write(first.read());
+            first = first.add(1);
+            result = result.add(1);
+        }
+        result
+    }
+
+    #[inline]
+    pub unsafe fn copy_backward(
+        first: *mut Self,
+        mut last: *mut Self,
+        mut result: *mut Value,
+    ) -> *mut Value {
+        while first != last {
+            last = last.sub(1);
+            result = result.sub(1);
+            result.write(last.read());
+        }
+        result
+    }
+    #[inline]
+    pub unsafe fn copy(
+        mut first: *mut Self,
+        last: *mut Self,
+        mut result: *mut Value,
+    ) -> *mut Value {
+        while first != last {
+            result.write(first.read());
+            first = first.add(1);
+            result = result.add(1);
+        }
+        result
+    }
+
+    pub fn to_object(&self, vm: &mut VM) -> Gc<Object> {
+        if self.is_undefined() || self.is_null() {
+            vm.throw_str("cannot convert undefined or null to object");
+        }
+
+        if let Some(obj) = self.downcast_ref::<Object>() {
+            obj
+        } else if self.is_int32() {
+            todo!()
+        } else {
+            todo!("{}", self)
+        }
     }
 }

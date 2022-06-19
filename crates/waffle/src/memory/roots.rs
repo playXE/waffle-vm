@@ -152,7 +152,7 @@ impl<T: Rootable> Rooted<T> {
         unsafe { &mut *self.value }
     }
 
-    pub fn get(&self) -> T
+    pub fn get_copy(&self) -> T
     where
         T: Copy,
     {
@@ -183,12 +183,40 @@ pub const fn get_root_meta_of<T: Rootable>() -> *const u8 {
     T::METADATA
 }
 
+#[inline]
+pub const fn get_root_meta_of_2<T: Rootable>(_: &T) -> *const u8 {
+    T::METADATA
+}
+
 unsafe impl<const N: usize> Send for FrameMap<N> {}
 unsafe impl<const N: usize> Sync for FrameMap<N> {}
 
 /// Constructs frame of GCed variables on stack. All variables remain rooted until end of the scope.
 #[macro_export]
 macro_rules! gc_frame {
+    ($chain: expr => $($i: ident = $e: expr),*) => {
+        $(
+            let mut $i = $e;
+        )*
+
+        let frame_map = {
+            const __ROOT_COUNT: usize = $crate::count!($($i)*);
+            $crate::memory::roots::FrameMap::new(__ROOT_COUNT as u32,[
+            $(
+                $crate::memory::roots::get_root_meta_of_2(&$i)
+            ),*
+        ]) };
+        let stack_entry = {
+            #[allow(unused_unsafe)]
+            unsafe {$crate::memory::roots::StackEntry::new(*$chain, &frame_map, [
+                $( &mut $i as *mut _ as *mut u8 ),*
+            ])}
+        };
+        #[allow(unused_unsafe)]
+        let _stack_entry_registration = unsafe{$crate::memory::roots::GcFrameRegistration::new($chain,&stack_entry)};
+
+        $crate::gc_frame!(@parse stack_entry, 0, $($i)*);
+    };
     ($chain: expr => $($i: ident: $t: ty),*) => {
         let stack_entry ={
             const __ROOT_COUNT: usize = $crate::count!($($i)*);

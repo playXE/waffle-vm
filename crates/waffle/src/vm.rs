@@ -1,43 +1,72 @@
+use crate::interpreter::*;
 use crate::{
     gc_frame,
     memory::{
         gcwrapper::{Array, GCWrapper, Gc, Nullable, Str},
-        minimark::read_uint_from_env,
-        Allocation, Finalize, Object, Trace, Visitor,
+        Allocation, Finalize, Managed, Trace, Visitor,
     },
+    object::Object,
     opcode::Op,
-    value::{
-        value_cmp, value_hash, ByteBuffer, Function, Module, Obj, Sym, Upvalue, Value, INVALID_CMP,
-    },
+    structure::Structure,
+    value::{ByteBuffer, Function, Module, Upvalue, Value, INVALID_CMP},
 };
 use std::{
-    hash::{Hash, Hasher},
+    hash::Hash,
     mem::size_of,
     panic::{self, catch_unwind, resume_unwind, AssertUnwindSafe},
     ptr::null_mut,
+    sync::atomic::AtomicBool,
 };
 
 pub struct VM {
     gc: GCWrapper,
 
-    sp: *mut Value,
-    csp: *mut Value,
+    pub(crate) sp: *mut Value,
+    pub(crate) csp: *mut Value,
     pub(crate) vthis: Value,
-    env: Nullable<Array<Nullable<Upvalue>>>,
+    pub(crate) env: Nullable<Array<Nullable<Upvalue>>>,
 
-    spmin: *mut Value,
-    spmax: *mut Value,
-    trap: isize,
-    exc_stack: Value,
+    pub(crate) spmin: *mut Value,
+    pub(crate) spmax: *mut Value,
+    pub(crate) trap: isize,
+    pub(crate) exc_stack: Value,
 
-    callback_ret: Nullable<Function>,
-    callback_mod: Nullable<Module>,
+    pub(crate) callback_ret: Nullable<Function>,
+    pub(crate) callback_mod: Nullable<Module>,
     trace_hook: u32,
 
     pub(crate) builtins: Value,
-    symtab: Box<[Option<Gc<Sym>>]>,
-    ids: [Option<Gc<Sym>>; Id::Last as u8 as usize],
-    open_upvalues: Nullable<Upvalue>,
+
+    ids: [Symbol; Id::Last as u8 as usize],
+    pub(crate) open_upvalues: Nullable<Upvalue>,
+    pub(crate) global: GlobalData,
+}
+
+#[derive(Default)]
+pub struct GlobalData {
+    pub empty_object_struct: Nullable<Structure>,
+    pub object_prototype: Nullable<Object>,
+    pub int_structure: Nullable<Structure>,
+    pub float_structure: Nullable<Structure>,
+    pub string_structure: Nullable<Structure>,
+    pub array_prototype: Nullable<Object>,
+    pub array_structure: Nullable<Structure>,
+    pub number_structure: Nullable<Structure>,
+    pub number_prototype: Nullable<Object>,
+}
+
+unsafe impl Trace for GlobalData {
+    fn trace(&mut self, visitor: &mut dyn Visitor) {
+        self.empty_object_struct.trace(visitor);
+        self.object_prototype.trace(visitor);
+        self.int_structure.trace(visitor);
+        self.float_structure.trace(visitor);
+        self.string_structure.trace(visitor);
+        self.array_prototype.trace(visitor);
+        self.array_structure.trace(visitor);
+        self.number_structure.trace(visitor);
+        self.number_prototype.trace(visitor);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
@@ -48,35 +77,24 @@ pub enum Id {
     Cache,
     Path,
     Libs,
+    Length,
+    Constructor,
     Last,
 }
 
-static IDS: &'static [&'static str] = &["loader", "exports", "cache", "path", "libs"];
+static IDS: &'static [&'static str] = &[
+    "loader",
+    "exports",
+    "cache",
+    "path",
+    "libs",
+    "length",
+    "constructor",
+];
 
 unsafe impl Trace for VM {
     fn trace(&mut self, vis: &mut dyn Visitor) {
         unsafe {
-            /*let mut cursor = self.sp;
-            let end = self.spmax;
-
-            while cursor < end {
-                (&mut *cursor).trace(vis);
-                cursor = cursor.add(1);
-            }
-
-            /*let mut cursor = self.spmin.sub(1);
-            let end = self.csp;
-
-            while cursor < end {
-                (&mut *cursor).trace(vis);
-                cursor = cursor.add(1);
-            }*/
-            let cspup = self.csp;
-            let mut csp = self.spmin.sub(1);
-            while csp != cspup {
-                (*csp).trace(vis);
-                csp = csp.add(1);
-            }*/
             let mut cursor = self.spmin;
             let end = self.spmax;
             while cursor < end {
@@ -90,14 +108,10 @@ unsafe impl Trace for VM {
             self.callback_ret.trace(vis);
             self.exc_stack.trace(vis);
             self.builtins.trace(vis);
-            for sym in self.symtab.iter_mut() {
-                sym.trace(vis);
-            }
-            for id in self.ids.iter_mut() {
-                id.trace(vis);
-            }
 
             self.open_upvalues.trace(vis);
+
+            self.global.trace(vis);
         }
     }
 }
@@ -105,31 +119,13 @@ unsafe impl Trace for VM {
 impl VM {
     pub const STACK_SIZE: usize = 256;
 
-    pub fn intern(&mut self, name: impl AsRef<str>) -> Gc<Sym> {
-        let name = name.as_ref();
-        let mut hasher = FxHasher64::default();
-        name.hash(&mut hasher);
-        let hash = hasher.finish();
-        let pos = (hash % self.symtab.len() as u64) as usize;
-        let mut node = self.symtab[pos];
-        while let Some(sym) = node {
-            if &**sym.name == name {
-                return sym;
-            }
-            node = sym.next;
-        }
-
-        let str = self.gc().str(name);
-        let mut sym = self.gc().fixed(Sym {
-            next: None,
-            name: str,
-        });
-        sym.next = self.symtab[pos];
-        self.symtab[pos] = Some(sym);
-
-        sym
+    pub fn this(&self) -> &Value {
+        &self.vthis
     }
 
+    pub fn intern(&mut self, x: impl Internable) -> Gc<Symbol> {
+        self.gc().fixed(x.intern())
+    }
     pub fn expect_str(&mut self, val: &Value) -> Gc<Str> {
         if let Some(str) = val.downcast_ref::<Str>() {
             return str;
@@ -158,7 +154,7 @@ impl VM {
         self.throw_str("bytebuffer expected")
     }
 
-    pub fn expect<T: 'static + Object, F: AsRef<str>>(&mut self, val: &Value, msg: F) -> Gc<T> {
+    pub fn expect<T: 'static + Managed, F: AsRef<str>>(&mut self, val: &Value, msg: F) -> Gc<T> {
         if let Some(obj) = val.downcast_ref::<T>() {
             return obj;
         }
@@ -166,7 +162,8 @@ impl VM {
     }
 
     pub fn new(stack_size: Option<usize>) -> &'static mut VM {
-        let symtab_size = read_uint_from_env("WAFFLE_SYMTAB_SIZE").unwrap_or_else(|| 128);
+        initialize_symbol_table();
+        //let symtab_size = read_uint_from_env("WAFFLE_SYMTAB_SIZE").unwrap_or_else(|| 128);
         let mut this = Box::leak(Box::new(VM {
             gc: GCWrapper::new(),
             env: Nullable::NULL,
@@ -181,9 +178,10 @@ impl VM {
             trace_hook: u32::MAX,
             trap: 0,
             builtins: Value::Null,
-            symtab: vec![None; symtab_size].into_boxed_slice(),
-            ids: [None; Id::Last as usize],
+
+            ids: [DUMMY_SYMBOL; Id::Last as usize],
             open_upvalues: Nullable::NULL,
+            global: Default::default(),
         }));
 
         let stack_size = stack_size.unwrap_or_else(|| VM::STACK_SIZE);
@@ -211,23 +209,36 @@ impl VM {
         this.callback_ret = f.nullable();
         this.callback_mod = m.nullable();
         for (i, id) in IDS.iter().enumerate() {
-            let s = this.intern(id);
-            this.ids[i] = Some(s);
+            let s = id.intern();
+            this.ids[i] = s;
         }
+        super::runtime::object::init(&mut this);
         super::builtin::init_builtin(&mut this);
+        gc_frame!(this.gc().roots() => builtins = this.builtins.downcast_ref::<Object>().unwrap());
+        let proto = this.global.object_prototype;
+        builtins.put(
+            &mut this,
+            "object".intern(),
+            Value::Object(proto.as_gc()),
+            false,
+        );
+        super::runtime::number::init(&mut this);
+        super::runtime::int::init(&mut this);
+        super::runtime::float::init(&mut this);
+        super::runtime::array::init(&mut this);
         this.gc().collect(0, &mut []);
         this
     }
 
-    pub fn id(&mut self, id: Id) -> Gc<Sym> {
-        self.ids[id as usize].unwrap()
+    pub fn id(&mut self, id: Id) -> Symbol {
+        self.ids[id as usize]
     }
 
     pub fn gc(&mut self) -> &mut GCWrapper {
         &mut self.gc
     }
 
-    pub fn identity_cmp<T: Object + ?Sized>(&mut self, a: Gc<T>, b: Gc<T>) -> i32 {
+    pub fn identity_cmp<T: Managed + ?Sized>(&mut self, a: Gc<T>, b: Gc<T>) -> i32 {
         let id1 = self.gc.identity(a);
         let id2 = self.gc.identity(b);
 
@@ -264,10 +275,10 @@ impl VM {
         loop {
             match panic::catch_unwind(AssertUnwindSafe(|| {
                 // Execute code
-                acc.set(interp_loop(self, module.get(), acc.get(), ip));
+                acc.set(interp_loop(self, module.get_copy(), acc.get_copy(), ip));
             })) {
                 // if no error thrown just return accumulator register
-                Ok(_) => return acc.get(),
+                Ok(_) => return acc.get_copy(),
                 // VM trap occured
                 Err(x) if x.is::<VMTrap>() => {
                     acc.set(self.vthis);
@@ -278,7 +289,7 @@ impl VM {
                     }
 
                     trap = self.spmax.cast::<u8>().sub(self.trap as _).cast::<Value>();
-                    //   println!("{:p} {:p} {}", trap, self.sp, self.trap);
+
                     if trap < self.sp {
                         // trap outside stack
                         self.trap = 0;
@@ -310,7 +321,6 @@ impl VM {
                         self.sp.write(Value::Null);
                         self.sp = self.sp.add(1);
                     }
-                    // println!("trap sp {:p} {:p}", sp, self.sp);
                 }
                 Err(x) => panic::resume_unwind(x),
             }
@@ -405,11 +415,11 @@ impl VM {
         let mut ret = Value::Null;
 
         if !vthis.is_null() {
-            self.vthis = vthis.get();
+            self.vthis = vthis.get_copy();
         }
         loop {
             self.setup_trap();
-            let result = panic::catch_unwind(AssertUnwindSafe(|| match f.get() {
+            let result = panic::catch_unwind(AssertUnwindSafe(|| match f.get_copy() {
                 x if x.is_function() => {
                     let x = x.prim_or_func();
                     check_arguments(self, args.len() as _, x.nargs as _, x.varsize);
@@ -423,7 +433,7 @@ impl VM {
                             x.varsize,
                         )
                     } else {
-                        if self.csp.add(4) >= self.sp.sub(args.len()) {
+                        if self.csp.add(5) >= self.sp.sub(args.len()) {
                             if let Some(_) = exc {
                                 self.process_trap();
                             }
@@ -446,6 +456,8 @@ impl VM {
                         self.csp = self.csp.add(1);
                         self.csp
                             .write(Value::encode_object_value(self.callback_mod.as_gc()));
+                        self.csp = self.csp.add(1);
+                        self.csp.write(Value::Bool(false));
 
                         ret = self.interp(x.module, Value::Null, x.addr);
                     }
@@ -460,8 +472,8 @@ impl VM {
                         *exc = Some(self.vthis);
 
                         self.process_trap();
-                        self.vthis = old_this.get();
-                        self.env = old_env.get();
+                        self.vthis = old_this.get_copy();
+                        self.env = old_env.get_copy();
 
                         return Value::Null;
                     } else {
@@ -471,8 +483,8 @@ impl VM {
             }
         }
 
-        self.vthis = old_this.get();
-        self.env = old_env.get();
+        self.vthis = old_this.get_copy();
+        self.env = old_env.get_copy();
         ret
     }
 
@@ -504,7 +516,7 @@ impl VM {
             self.sp = self.sp.add(1);
         }
     }
-    unsafe fn close_upvalues(&mut self, slot: *mut Value) {
+    pub(crate) unsafe fn close_upvalues(&mut self, slot: *mut Value) {
         let mut prev = Nullable::<Upvalue>::NULL;
         let mut ls = self.open_upvalues;
         while ls.is_not_null() {
@@ -539,967 +551,14 @@ impl VM {
             // if this is not an VM error just resume unwinding
             Err(x) => resume_unwind(x),
         };
-        self.vthis = old_vthis.get();
-        self.env = old_env.get();
+        self.vthis = old_vthis.get_copy();
+        self.env = old_env.get_copy();
 
         ret
     }
 }
-use fxhash::FxHasher64;
+
 use libloading_mini::Library;
-use std::mem::transmute;
-use Op::*;
-#[inline(never)]
-unsafe fn dispatch_func(
-    vm: &mut VM,
-    mut sp: *mut Value,
-    f: usize,
-    nargs: u32,
-    varsize: bool,
-) -> Value {
-    if varsize {
-        let f = transmute::<_, extern "C" fn(&mut VM, &Gc<Array<Value>>) -> Value>(f);
-        let mut args = vm.gc().array(nargs as _, Value::Null);
-        let mut i = nargs as usize;
-        sp = sp.add(nargs as _);
-        let mut j = 0;
-        while i > 0 {
-            sp = sp.sub(1);
-            args[j] = sp.read();
-            j += 1;
-            i -= 1;
-        }
-
-        vm.gc().write_barrier(args);
-        return f(vm, &args);
-    } else {
-        match nargs {
-            0 => (transmute::<_, extern "C" fn(&mut VM) -> Value>(f))(vm),
-            1 => (transmute::<_, extern "C" fn(&mut VM, &Value) -> Value>(f))(vm, &*sp),
-            2 => (transmute::<_, extern "C" fn(&mut VM, &Value, &Value) -> Value>(f))(
-                vm,
-                &*sp.add(1),
-                &*sp,
-            ),
-            3 => (transmute::<_, extern "C" fn(&mut VM, &Value, &Value, &Value) -> Value>(f))(
-                vm,
-                &*sp.add(2),
-                &*sp.add(1),
-                &*sp,
-            ),
-            4 => (transmute::<_, extern "C" fn(&mut VM, &Value, &Value, &Value, &Value) -> Value>(
-                f,
-            ))(vm, &*sp.add(3), &*sp.add(2), &*sp.add(1), &*sp),
-            5 => (transmute::<
-                _,
-                extern "C" fn(&mut VM, &Value, &Value, &Value, &Value, &Value) -> Value,
-            >(f))(vm, &*sp.add(4), &*sp.add(3), &*sp.add(2), &*sp.add(1), &*sp),
-
-            _ => todo!(),
-        }
-    }
-}
-
-#[inline(never)]
-unsafe fn dispatch_func2(
-    vm: &mut VM,
-    mut sp: *mut Value,
-    f: usize,
-    nargs: u32,
-    varsize: bool,
-) -> Value {
-    if varsize {
-        let f = transmute::<_, extern "C" fn(&mut VM, &Gc<Array<Value>>) -> Value>(f);
-        let mut args = vm.gc().array(nargs as _, Value::Null);
-
-        sp = sp.add(nargs as _);
-        for i in 0..nargs as usize {
-            args[i] = sp.add(i).read();
-        }
-
-        vm.gc().write_barrier(args);
-        return f(vm, &args);
-    } else {
-        match nargs {
-            0 => (transmute::<_, extern "C" fn(&mut VM) -> Value>(f))(vm),
-            1 => (transmute::<_, extern "C" fn(&mut VM, &Value) -> Value>(f))(vm, &*sp),
-            2 => (transmute::<_, extern "C" fn(&mut VM, &Value, &Value) -> Value>(f))(
-                vm,
-                &*sp,
-                &*sp.add(1),
-            ),
-            3 => (transmute::<_, extern "C" fn(&mut VM, &Value, &Value, &Value) -> Value>(f))(
-                vm,
-                &*sp,
-                &*sp.add(1),
-                &*sp.add(2),
-            ),
-            4 => (transmute::<_, extern "C" fn(&mut VM, &Value, &Value, &Value, &Value) -> Value>(
-                f,
-            ))(vm, &*sp.add(1), &*sp.add(2), &*sp.add(3), &*sp),
-            5 => (transmute::<
-                _,
-                extern "C" fn(&mut VM, &Value, &Value, &Value, &Value, &Value) -> Value,
-            >(f))(vm, &*sp, &*sp.add(1), &*sp.add(2), &*sp.add(3), &*sp.add(4)),
-
-            _ => todo!(),
-        }
-    }
-}
-
-fn check_arguments(vm: &mut VM, argc: usize, expected: usize, variable: bool) {
-    if argc < expected && !variable {
-        vm.throw_str(format!(
-            "function expected at least {} arguments but found {}",
-            expected, argc
-        ));
-    } else if argc > expected && !variable {
-        vm.throw_str(format!(
-            "function expected at most {} arguments but found {}",
-            expected, argc
-        ))
-    }
-}
-
-fn interp_loop(vm: &mut VM, mut m: Nullable<Module>, mut acc: Value, mut ip: usize) -> Value {
-    gc_frame!(vm.gc().roots() => m: Nullable<Module>,acc: Value);
-    let mut sp = vm.sp;
-    let mut csp = vm.csp;
-
-    macro_rules! pop {
-        ($n: expr) => {{
-            let mut tmp = $n;
-            while tmp > 0 {
-                sp.write(Value::Null);
-                sp = sp.add(1);
-                tmp -= 1;
-            }
-        }};
-    }
-
-    macro_rules! pop_infos {
-        ($restpc: expr) => {{
-            /*m.set(csp.read().module());*/
-            let m_ = csp.read().module();
-            // println!("ASSIGN {:p} to {:p} ({:p})", m_, m, *m);
-            m.set(m_);
-            csp.write(Value::Null);
-            csp = csp.sub(1);
-            vm.vthis = csp.read();
-            csp.write(Value::Null);
-            csp = csp.sub(1);
-
-            vm.env = match csp.read() {
-                x if x.is_null() => Nullable::NULL,
-                x => x
-                    .downcast_ref::<Array<Nullable<Upvalue>>>()
-                    .unwrap()
-                    .nullable(),
-            };
-            csp.write(Value::Null);
-            csp = csp.sub(1);
-
-            if $restpc {
-                ip = csp.read().int() as usize;
-            }
-            csp.write(Value::Null);
-            csp = csp.sub(1);
-        }};
-    }
-
-    macro_rules! push_infos {
-        () => {
-            csp = csp.add(1);
-            csp.write(Value::Int(ip as _));
-
-            csp = csp.add(1);
-            csp.write(if vm.env.is_not_null() {
-                Value::Abstract(vm.env.as_gc().as_dyn())
-            } else {
-                Value::Null
-            });
-
-            csp = csp.add(1);
-            csp.write(vm.vthis);
-
-            csp = csp.add(1);
-            csp.write(if m.get().is_null() {
-                Value::Null
-            } else {
-                Value::encode_object_value(m.get().as_gc())
-            });
-        };
-    }
-
-    macro_rules! save {
-        () => {
-            vm.csp = csp;
-            vm.sp = sp;
-        };
-    }
-
-    macro_rules! restore {
-        () => {
-            sp = vm.sp;
-            csp = vm.csp;
-        };
-    }
-
-    macro_rules! object_op {
-        ($obj: expr,$param: expr,$id: expr,$err: expr) => {
-            let id = Value::Symbol(vm.intern(stringify!($id)));
-            let f = $obj.field(vm, &id);
-            match f {
-                x if !x.is_function() => $err,
-                _ => {
-                    push_infos!();
-                    save!();
-                    let mut p = [*$param];
-                    gc_frame!(vm.gc().roots() => p: [Value;1]);
-                    acc.set(vm.callex(Value::Object(*$obj), f, p.as_ref(),&mut None));
-                    restore!();
-                    pop_infos!(false);
-                }
-            }
-        };
-        ($obj: expr,$params: expr,$id: expr) => {
-            object_op!($obj, $params, $id, vm.throw_str("Unsupported operation"))
-        };
-    }
-
-    macro_rules! setup_before_call {
-        ($this: expr) => {
-            let f = acc.get().prim_or_func();
-            push_infos!();
-            vm.vthis = $this;
-            vm.env = f.env;
-            save!();
-        };
-    }
-    macro_rules! stack_valid {
-        () => {
-            debug_assert!(sp <= vm.spmax && sp > vm.csp && sp >= vm.spmin);
-        };
-    }
-    macro_rules! restore_after_call {
-        () => {
-            restore!();
-            pop_infos!(false);
-        };
-    }
-    macro_rules! do_call {
-        ($cur_this: expr,$nargs: expr) => {
-            //    println!("CALL {} {}", acc.get(), $nargs);
-            match acc.get() {
-                x if x.is_function() => {
-                    let func = x.prim_or_func();
-                    check_arguments(vm, $nargs as _, func.nargs as _, func.varsize);
-                    if !func.prim {
-                        push_infos!();
-                        m.set(func.module);
-                        ip = func.addr as _;
-                        vm.vthis = $cur_this;
-                        vm.env = func.env;
-                        // store number of arguments in accumulator register
-                        acc.set(Value::Int($nargs as _));
-                    } else {
-                        let prim = func;
-
-                        setup_before_call!($cur_this);
-
-                        acc.set(dispatch_func(vm, sp, prim.addr, $nargs as _, prim.varsize));
-                        restore_after_call!();
-                        pop!($nargs);
-                    }
-                }
-                _ => vm.throw_str(&format!("call failure: {}", acc.get())),
-            }
-        };
-    }
-    macro_rules! test {
-        ($op: tt) => {{
-            save!();
-            let tmp = crate::value::value_cmp(vm, &*sp, acc.as_ref());
-            restore!();
-            sp.write(Value::Null);
-            sp = sp.add(1);
-            let x = tmp.get_int32();
-            acc.set(Value::Bool(x $op 0 && x != INVALID_CMP));
-
-
-        }};
-    }
-
-    macro_rules! intop {
-        ($op: tt) => {{
-            match (acc.get(),sp.read()) {
-                (x,y) if x.is_int32() && y.is_int32() => { acc.set(Value::Int(x.get_int32() $op y.get_int32())); },
-                _ => vm.throw_str(concat!("incompatible types for '", stringify!($op), "'"))
-            }
-            sp.write(Value::Null);
-            sp = sp.add(1);
-        }}
-    }
-    loop {
-        unsafe {
-            //    println!("MODULE PTR {:p} {:p}", m.get(), m);
-            let op = m.get()[ip];
-            let op = std::mem::transmute::<_, Op>(op);
-            /*  println!(
-                "({} ({:p}) {:p} {:p}) {}: {:?}",
-                m.name,
-                m.name,
-                m.as_gc(),
-                m,
-                ip,
-                op
-            );*/
-            ip += 1;
-            stack_valid!();
-            match op {
-                AccNull => {
-                    acc.set(Value::Null);
-                }
-                AccTrue => {
-                    acc.set(Value::Bool(true));
-                }
-                AccFalse => {
-                    acc.set(Value::Bool(false));
-                }
-
-                AccThis => {
-                    acc.set(vm.vthis);
-                }
-                AccInt(int) => {
-                    acc.set(Value::Int(int as i32));
-                }
-                AccStack(ix) => {
-                    acc.set(sp.offset(ix as _).read());
-                }
-                AccGlobal(ix) => {
-                    acc.set(m.globals[ix as usize]);
-                }
-                AccField(ix) => {
-                    let mut name = m.globals[ix as usize];
-                    let object = acc.get();
-
-                    match object {
-                        x if x.is_obj() => {
-                            let mut object = x.downcast_ref::<Obj>().unwrap();
-                            gc_frame!(vm.gc().roots() => object: Gc<Obj>,name: Value);
-                            let tmp = object.field(vm, &name);
-
-                            *acc = tmp;
-                        }
-
-                        _ => vm.throw_str("invalid field access"),
-                    }
-                }
-                AccArray => {
-                    if acc.is_int32() && (*sp).is_array() {
-                        let x = acc.get_int32();
-                        let arr = (*sp).downcast_ref::<Array<Value>>().unwrap();
-                        let k = x;
-                        if k < 0 || k >= arr.len() as i32 {
-                            acc.set(Value::Null);
-                        } else {
-                            acc.set(arr[k as usize]);
-                        }
-
-                        sp = sp.add(1);
-                    } else if (*sp).is_obj() {
-                        let mut obj = (*sp).downcast_ref::<Obj>().unwrap();
-                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
-                        object_op!(obj, acc.as_ref(), __get);
-                        sp.write(Value::Null);
-                        sp = sp.add(1);
-                    } else {
-                        vm.throw_str("invalid array access");
-                    }
-                }
-                AccIndex(ix) => {
-                    if let Some(arr) = acc.downcast_ref::<Array<Value>>() {
-                        if ix < 0 || ix >= arr.len() as i32 {
-                            acc.set(Value::Null);
-                        } else {
-                            acc.set(arr[ix as usize]);
-                        }
-                    } else if let Some(mut obj) = acc.downcast_ref::<Obj>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
-                        object_op!(obj.as_mut(), acc.as_ref(), __get);
-                    } else {
-                        vm.throw_str("invalid array access")
-                    }
-                }
-                AccBuiltinResolved(val) => {
-                    acc.set(val);
-                }
-                AccBuiltin(ix) => {
-                    let f = &m.globals[ix as usize];
-                    let obj = vm.builtins.downcast_ref::<Obj>().unwrap_unchecked();
-
-                    let field = obj.field(vm, f);
-                    *acc = field;
-                    // patch code so next builtin load is O(1)
-                    m[ip - 1] = Op::AccBuiltinResolved(field);
-                }
-
-                AccEnv(ix) => {
-                    let upval = vm.env[ix as usize];
-                    if upval.closed {
-                        acc.set(upval.state.local);
-                    } else {
-                        acc.set(upval.state.slot.read());
-                    }
-                }
-                Push => {
-                    sp = sp.sub(1);
-                    sp.write(acc.get());
-                }
-                Pop(n) => {
-                    pop!(n);
-                }
-                SetStack(ix) => {
-                    sp.offset(ix as _).write(acc.get());
-                }
-                SetField(ix) => {
-                    let field = &m.globals[ix as usize];
-                    let obj = *sp;
-                    if let Some(mut object) = obj.downcast_ref::<Obj>() {
-                        gc_frame!(vm.gc().roots() => object: Gc<Obj>);
-                        object.insert(vm, field, acc.as_ref());
-                    } else {
-                        vm.throw_str("invalid field access");
-                    }
-
-                    sp.write(Value::Null);
-                    sp = sp.add(1);
-                }
-                SetArray => {
-                    /*match (&mut *sp, &*sp.add(1)) {
-                        (Value::Array(arr), Value::Int(k)) => {
-                            let k = *k;
-                            if k < arr.len() as i64 && k >= 0 {
-                                arr[k as usize] = acc.get();
-                                vm.gc().write_barrier(*arr);
-                            }
-                        }
-                        (Value::Object(obj), arg0) => {
-                            let string = vm.intern("__set");
-                            let mut f = obj.field(vm, &Value::Symbol(string));
-                            if matches!(f, Value::Null) {
-                                vm.throw_str("unsupported operation");
-                            }
-                            let mut args = [*arg0, acc.get()];
-                            gc_frame!(vm.gc().roots() => f: Value,args: [Value;2]);
-                            push_infos!();
-                            save!();
-                            vm.callex(sp.read(), f.get(), args.as_ref(), &mut None);
-                            restore!();
-                            pop_infos!(false);
-                        }
-                        _ => vm.throw_str("invalid array access"),
-                    }*/
-                    if (*sp).is_array() && (*sp.add(1)).is_int32() {
-                        let k = sp.add(1).read().get_int32();
-                        let mut arr = sp.read().array();
-                        if k < arr.len() as i32 && k >= 0 {
-                            arr[k as usize] = acc.get();
-                            vm.gc().write_barrier(arr);
-                        }
-                    } else if (*sp).is_obj() {
-                        let arg0 = sp.add(1).read();
-                        let string = vm.intern("__set");
-                        let object = sp.read().downcast_ref::<Obj>().unwrap_unchecked();
-                        let mut f = object.field(vm, &Value::Symbol(string));
-                        if !f.is_function() {
-                            vm.throw_str("unsupported operation");
-                        }
-                        let mut args = [arg0, acc.get()];
-                        gc_frame!(vm.gc().roots() => f: Value,args: [Value;2]);
-                        push_infos!();
-                        save!();
-                        vm.callex(sp.read(), f.get(), args.as_ref(), &mut None);
-                        restore!();
-                        pop_infos!(false);
-                    } else {
-                        vm.throw_str("invalid array access");
-                    }
-                    sp.write(Value::Null);
-                    sp = sp.add(1);
-                    sp.write(Value::Null);
-                    sp = sp.add(1);
-                }
-                SetIndex(k) => {
-                    if (*sp).is_array() {
-                        let mut arr = sp.read().array();
-                        if k < arr.len() as i32 && k >= 0 {
-                            arr[k as usize] = acc.get();
-                            vm.gc().write_barrier(arr);
-                        }
-                    } else if (*sp).is_obj() {
-                        let arg0 = Value::Int(k);
-                        let string = vm.intern("__set");
-                        let object = sp.read().downcast_ref::<Obj>().unwrap_unchecked();
-                        let mut f = object.field(vm, &Value::Symbol(string));
-                        if !f.is_function() {
-                            vm.throw_str("unsupported operation");
-                        }
-                        let mut args = [arg0, acc.get()];
-                        gc_frame!(vm.gc().roots() => f: Value,args: [Value;2]);
-                        push_infos!();
-                        save!();
-                        vm.callex(sp.read(), f.get(), args.as_ref(), &mut None);
-                        restore!();
-                        pop_infos!(false);
-                    } else {
-                        vm.throw_str("invalid array access");
-                    }
-
-                    sp.write(Value::Null);
-                    sp = sp.add(1);
-                }
-
-                SetEnv(ix) => {
-                    let mut upval = vm.env[ix as usize];
-                    if upval.closed {
-                        upval.state.local = acc.get();
-                    } else {
-                        upval.state.slot.write(acc.get());
-                    }
-                    vm.gc().write_barrier(upval.as_gc());
-                }
-                SetGlobal(ix) => {
-                    let mut globals = m.globals;
-
-                    globals[ix as usize] = acc.get();
-                    vm.gc().write_barrier(globals.as_gc());
-                }
-
-                SetThis => {
-                    vm.vthis = acc.get();
-                }
-
-                TailCall(mut stack, nargs) => {
-                    let mut i = nargs as i32;
-                    let cur_this = vm.vthis;
-                    stack -= nargs;
-                    sp = sp.add(nargs as _);
-                    while i > 0 {
-                        sp = sp.sub(1);
-                        sp.add(stack as _).write(sp.read());
-                        i -= 1;
-                    }
-
-                    while stack > 0 {
-                        stack -= 1;
-                        vm.close_upvalues(sp);
-                        sp.write(Value::Null);
-                        sp = sp.add(1);
-                    }
-
-                    pop_infos!(true);
-                    do_call!(cur_this, nargs);
-                }
-                Call(nargs) => {
-                    do_call!(vm.vthis, nargs);
-                }
-
-                ObjCall(nargs) => {
-                    let vtmp = sp.read();
-                    sp.write(Value::Null);
-                    sp = sp.add(1);
-                    do_call!(vtmp, nargs);
-                }
-
-                Jump(ix) => {
-                    ip -= 1;
-                    ip = (ip as isize + ix as isize) as usize;
-                }
-                JumpIf(ix) => {
-                    if acc.get().bool() {
-                        ip -= 1;
-                        ip = (ip as isize + ix as isize) as usize;
-                    }
-                }
-                JumpIfNot(ix) => {
-                    if !acc.get().bool() {
-                        ip -= 1;
-                        ip = (ip as isize + ix as isize) as usize;
-                    }
-                }
-
-                Trap(ix) => {
-                    sp = sp.sub(6);
-                    sp.write(Value::Int(vm.csp as i32 - vm.spmin as i32));
-                    sp.add(1).write(vm.vthis);
-                    sp.add(2).write(if vm.env.is_not_null() {
-                        Value::Abstract(vm.env.as_gc().as_dyn())
-                    } else {
-                        Value::Null
-                    });
-                    sp.add(3).write(Value::Int(ip as i32 + ix as i32));
-                    sp.add(4).write(if m.is_null() {
-                        Value::Null
-                    } else {
-                        Value::encode_object_value(m.as_gc())
-                    });
-                    sp.add(5).write(Value::Int(vm.trap as _));
-                    vm.trap = vm.spmax as isize - sp as isize;
-                    //       println!("SET TRAP {:x} {:p}", vm.trap, sp);
-                }
-                EndTrap => {
-                    vm.trap = sp.add(5).read().int() as _;
-                    pop!(6);
-                }
-                Ret(nargs) => {
-                    for i in 0..nargs {
-                        vm.close_upvalues(sp.add(i as _));
-                    }
-                    pop!(nargs);
-                    pop_infos!(true);
-                }
-                CloseUpvalue => {
-                    vm.close_upvalues(sp);
-                    pop!(1);
-                }
-                MakeEnv(n) => {
-                    let mut func = acc.get().prim_or_func();
-                    let mut upvals = func.module.globals[n as usize].array();
-                    let mut real_upvals = vm.gc().array(upvals.len(), Nullable::NULL);
-                    gc_frame!(vm.gc().roots() => func: Gc<Function>, upvals: Gc<Array<Value>>, real_upvals: Gc<Array<Nullable<Upvalue>>>);
-
-                    for i in 0..upvals.len() {
-                        let [is_local, index] = std::mem::transmute::<_, [i16; 2]>(upvals[i].int());
-                        if is_local == 0 {
-                            real_upvals[i] = vm.env[index as usize];
-                        } else {
-                            let slot = sp.add(index as usize);
-                            //    println!("upval at {}: {}", index, sp.read());
-                            let upval = {
-                                let mut upval = Nullable::NULL;
-                                let mut open = vm.open_upvalues;
-                                while open.is_not_null() {
-                                    if open.state.slot == slot {
-                                        upval = open;
-                                    }
-                                    open = open.next;
-                                }
-                                if upval.is_null() {
-                                    let tmp = vm.open_upvalues;
-                                    upval = vm
-                                        .gc()
-                                        .fixed(Upvalue {
-                                            next: tmp,
-                                            closed: false,
-                                            state: crate::value::UpvalState { slot },
-                                        })
-                                        .nullable();
-                                    vm.open_upvalues = upval;
-                                }
-                                upval
-                            };
-                            real_upvals[i] = upval;
-                        }
-                        vm.gc().write_barrier(*real_upvals);
-                    }
-                    acc.set(Value::Function(vm.gc().fixed(Function {
-                        module: func.module,
-                        env: real_upvals.nullable(),
-                        addr: func.addr,
-                        nargs: func.nargs,
-                        varsize: func.varsize,
-                        prim: func.prim,
-                    })));
-                }
-
-                MakeArray(mut n) => {
-                    // std::env::set_var("WAFFLE_GC_VERBOSE", "1");
-                    //  println!("MODULE {:p} at {:p}", m.as_gc(), m);
-                    let mut arr = vm.gc().array(n as usize + 1, Value::Null);
-                    while n != 0 {
-                        arr[n as usize] = sp.read();
-                        sp.write(Value::Null);
-                        sp = sp.add(1);
-                        n -= 1;
-                    }
-                    arr[0] = acc.get();
-                    vm.gc().write_barrier(arr);
-                    //  std::env::set_var("WAFFLE_GC_VERBOSE", "0");
-                    acc.set(Value::Array(arr));
-                }
-
-                Bool => {
-                    let v = acc.get();
-                    if v.is_true() || v.is_false() {
-                        acc.set(Value::Bool(false));
-                    } else {
-                        acc.set(Value::Bool(true));
-                    }
-                }
-
-                Not => {
-                    let v = acc.get();
-                    if v.is_null() || v.is_false() {
-                        acc.set(Value::Bool(true));
-                    } else {
-                        acc.set(Value::Bool(false));
-                    }
-                }
-                Add => {
-                    /*  match (acc.get(), &mut *sp) {
-                        (Value::Int(x), Value::Int(y)) => {
-                            acc.set(Value::Int(y.wrapping_add(x)));
-                            pop!(1);
-                        }
-                        (x, y) if x.is_numeric() && y.is_numeric() => {
-                            let y = y.get_number();
-                            let x = x.get_number();
-                            acc.set(Value::Float(x + y));
-                            pop!(1);
-                        }
-                        (_, Value::Object(obj)) => {
-                            object_op!(obj, acc.as_ref(), __add);
-                            pop!(1);
-                        }
-                        _ => vm.throw_str(&format!("wrong operands for +: {} {}", acc.get(), *sp)),
-                    }*/
-                    let rhs = acc.get();
-                    let lhs = sp.read();
-                    if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(lhs.get_int32().wrapping_add(rhs.get_int32())));
-                        pop!(1);
-                    } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Float(lhs.get_number() + rhs.get_number()));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
-                        object_op!(obj, acc.as_ref(), __add);
-                        pop!(1);
-                    } else {
-                        vm.throw_str(&format!("wrong operands for +: {} {}", acc.get(), *sp));
-                    }
-                }
-                Sub => {
-                    let rhs = acc.get();
-                    let lhs = sp.read();
-                    if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(lhs.get_int32().wrapping_sub(rhs.get_int32())));
-                        pop!(1);
-                    } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Float(lhs.get_number() - rhs.get_number()));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
-                        object_op!(obj, acc.as_ref(), __sub);
-                        pop!(1);
-                    } else {
-                        vm.throw_str(&format!("wrong operands for -: {} {}", acc.get(), *sp));
-                    }
-                }
-
-                Div => {
-                    let rhs = acc.get();
-                    let lhs = sp.read();
-                    if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(lhs.get_int32().wrapping_div(rhs.get_int32())));
-                        pop!(1);
-                    } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Float(lhs.get_number() / rhs.get_number()));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
-                        object_op!(obj, acc.as_ref(), __div);
-                        pop!(1);
-                    } else {
-                        vm.throw_str(&format!("wrong operands for /: {} {}", acc.get(), *sp));
-                    }
-                }
-
-                Mul => {
-                    let rhs = acc.get();
-                    let lhs = sp.read();
-                    if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(lhs.get_int32().wrapping_mul(rhs.get_int32())));
-                        pop!(1);
-                    } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Float(lhs.get_number() * rhs.get_number()));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
-                        object_op!(obj, acc.as_ref(), __mul);
-                        pop!(1);
-                    } else {
-                        vm.throw_str(&format!("wrong operands for *: {} {}", acc.get(), *sp));
-                    }
-                }
-
-                Mod => {
-                    let rhs = acc.get();
-                    let lhs = sp.read();
-                    if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(lhs.get_int32().wrapping_rem(rhs.get_int32())));
-                        pop!(1);
-                    } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Float(lhs.get_number() % rhs.get_number()));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
-                        object_op!(obj, acc.as_ref(), __mod);
-                        pop!(1);
-                    } else {
-                        vm.throw_str(&format!("wrong operands for %: {} {}", acc.get(), *sp));
-                    }
-                }
-                Shl => {
-                    let rhs = acc.get();
-                    let lhs = sp.read();
-                    if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(
-                            lhs.get_int32().wrapping_shl(rhs.get_int32() as _),
-                        ));
-                        pop!(1);
-                    } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Int(
-                            (lhs.get_number() as i32).wrapping_shl(rhs.get_number() as _),
-                        ));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
-                        object_op!(obj, acc.as_ref(), __shl);
-                        pop!(1);
-                    } else {
-                        vm.throw_str(&format!("wrong operands for <<: {} {}", acc.get(), *sp));
-                    }
-                }
-
-                Shr => {
-                    let rhs = acc.get();
-                    let lhs = sp.read();
-                    if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(
-                            lhs.get_int32().wrapping_shr(rhs.get_int32() as _),
-                        ));
-                        pop!(1);
-                    } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Int(
-                            (lhs.get_number() as i32).wrapping_shr(rhs.get_number() as _),
-                        ));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
-                        object_op!(obj, acc.as_ref(), __shr);
-                        pop!(1);
-                    } else {
-                        vm.throw_str(&format!("wrong operands for >>: {} {}", acc.get(), *sp));
-                    }
-                }
-                UShr => {
-                    let rhs = acc.get();
-                    let lhs = sp.read();
-                    if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(
-                            ((lhs.get_int32() as u32).wrapping_shl(rhs.get_int32() as _)) as i32,
-                        ));
-                        pop!(1);
-                    } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Int(
-                            (lhs.get_number() as u32).wrapping_shl(rhs.get_number() as _) as i32,
-                        ));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Obj>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Obj>);
-                        object_op!(obj, acc.as_ref(), __ushr);
-                        pop!(1);
-                    } else {
-                        vm.throw_str(&format!("wrong operands for <<: {} {}", acc.get(), *sp));
-                    }
-                }
-                Eq => test!(==),
-                Neq => test!(!=),
-                Gt => test!(>),
-                Gte => test!(>=),
-                Lt => test!(<),
-                Lte => test!(<=),
-                Compare => {
-                    save!();
-                    let c = value_cmp(vm, &*sp, &*acc);
-                    restore!();
-                    acc.set(if c.get_int32() == INVALID_CMP {
-                        Value::Null
-                    } else {
-                        c
-                    });
-                }
-                IsNull => {
-                    acc.set(Value::Bool(acc.get().is_null()));
-                }
-                IsNotNull => {
-                    acc.set(Value::Bool(!acc.is_null()));
-                }
-                Or => {
-                    match (acc.get(), sp.read()) {
-                        (x, y) if x.is_int32() && y.is_int32() => {
-                            acc.set(Value::Int(x.get_int32() | y.get_int32()));
-                        }
-                        (x, y) if x.is_bool() && y.is_bool() => {
-                            acc.set(Value::Bool(x.get_bool() | y.get_bool()));
-                        }
-                        _ => {
-                            vm.throw_str(concat!("incompatible types for '", stringify!($op), "'"))
-                        }
-                    }
-                    sp.write(Value::Null);
-                    sp = sp.add(1);
-                }
-                And => {
-                    match (acc.get(), sp.read()) {
-                        (x, y) if x.is_int32() && y.is_int32() => {
-                            acc.set(Value::Int(x.get_int32() & y.get_int32()));
-                        }
-                        (x, y) if x.is_bool() && y.is_bool() => {
-                            acc.set(Value::Bool(x.get_bool() & y.get_bool()));
-                        }
-                        _ => {
-                            vm.throw_str(concat!("incompatible types for '", stringify!($op), "'"))
-                        }
-                    }
-                    sp.write(Value::Null);
-                    sp = sp.add(1);
-                }
-                Xor => intop!(^),
-                TypeOf => {
-                    let tag = acc.tag();
-                    acc.set(WAFFLE_TYPEOF[tag as usize]);
-                }
-                New => {
-                    save!();
-                    acc.set(match acc.get() {
-                        x if x.is_obj() => {
-                            Value::Object(Obj::with_proto(vm, x.downcast_ref().unwrap_unchecked()))
-                        }
-                        _ => Value::Object(Obj::new(vm)),
-                    });
-                }
-                Hash => {
-                    save!();
-                    let hash = value_hash(vm, &*acc);
-                    acc.set(hash);
-                }
-                Apply(_) => todo!(),
-                JumpTable(_) => todo!(),
-
-                Leave | Last => break,
-                _ => todo!("{:p} {}", *m, m.name),
-            }
-            stack_valid!();
-        }
-    }
-
-    vm.sp = sp;
-    vm.csp = csp;
-    acc.get()
-}
 
 pub struct VMTrap;
 
@@ -1518,6 +577,7 @@ fn callback_return(vm: &mut VM) -> (Gc<Function>, Gc<Module>) {
             globals: Nullable::NULL,
             exports: Value::Null,
             loader: Value::Null,
+            feedback: Nullable::NULL,
             code_size: 1,
             code: [],
         });
@@ -1532,6 +592,7 @@ fn callback_return(vm: &mut VM) -> (Gc<Function>, Gc<Module>) {
             addr: 0,
             module: module.nullable(),
             prim: false,
+            construct_struct: Nullable::NULL,
         });
 
         (func.assume_init(), module)
@@ -1551,9 +612,9 @@ unsafe impl Finalize for LibList {}
 unsafe impl Trace for LibList {}
 unsafe impl Allocation for LibList {
     const FINALIZE: bool = true;
-    const LIGHT_FINALIZER: bool = false;
+    const LIGHT_FINALIZER: bool = true;
 }
-impl Object for LibList {}
+impl Managed for LibList {}
 
 pub const WAFFLE_TYPEOF: [Value; 17] = [
     Value::Int(0),
@@ -1574,3 +635,262 @@ pub const WAFFLE_TYPEOF: [Value; 17] = [
     Value::Int(15),
     Value::Int(16),
 ];
+
+macro_rules! builtin_symbols {
+    ($m: ident) => {
+        $m! {
+            /*PROTOTYPE prototype 0,
+            TO_STRING toString 1,
+            CONSTRUCTOR constructor 2,
+            LENGTH length 3,
+            BYTE_LENGTH byteLength 4,
+            GET get 5,
+            SET set 6,
+            CALL call 7,
+            APPLY apply 8*/
+
+        }
+    };
+}
+
+macro_rules! def_sid {
+    ($($id: ident $val: ident $ix: expr),*) => {
+        $(pub const $id: SymbolID = SymbolID($ix);)*
+    };
+}
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub struct SymbolID(pub(crate) u32);
+
+impl SymbolID {
+    builtin_symbols! {
+        def_sid
+    }
+
+    pub const PUBLIC_START: SymbolID = Self(128);
+}
+/// VirtualMachine symbol type.
+///
+///
+/// This type is used as property names and inside Symbol.
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
+pub enum Symbol {
+    /// Interned string.
+    Key(SymbolID),
+    /// Private symbol. You can't create it in JS world.
+    Private(SymbolID),
+    /// Represents index value, this variant is used when you can definetely put array
+    /// index inside u32 so it does not take space in interner.
+    Index(u32),
+}
+
+macro_rules! def_sym {
+    ($($id: ident $val: ident $ix: expr),*) => {
+        $(
+            pub const $id: Symbol = Symbol::Key(SymbolID::$id);
+        )*
+    };
+}
+
+impl Symbol {
+    builtin_symbols! {
+        def_sym
+    }
+    pub fn private(self) -> Self {
+        match self {
+            Self::Key(x) => Self::Private(x),
+            _ => unreachable!(),
+        }
+    }
+    pub fn get_id(self) -> SymbolID {
+        match self {
+            Self::Key(x) => x,
+            Self::Private(x) => x,
+            _ => unreachable!(),
+        }
+    }
+    pub fn is_index(self) -> bool {
+        /*match self {
+            Self::Index(_) => true,
+            _ => false,
+        }*/
+        matches!(self, Self::Index(_))
+    }
+    pub fn get_index(self) -> u32 {
+        match self {
+            Self::Index(x) => x,
+            _ => unreachable!(),
+        }
+    }
+    pub fn is_key(self) -> bool {
+        !self.is_index()
+    }
+
+    pub fn description(self, table: &SymbolTable) -> String {
+        match self {
+            Symbol::Index(ix) => ix.to_string(),
+            Symbol::Key(key) => table.description(key).to_string(),
+            Symbol::Private(key) => format!("#{}", table.description(key)),
+        }
+    }
+}
+
+unsafe impl Trace for Symbol {}
+unsafe impl Finalize for Symbol {}
+impl Managed for Symbol {}
+
+pub const DUMMY_SYMBOL: Symbol = Symbol::Key(SymbolID(0));
+
+use dashmap::DashMap;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
+pub struct SymbolTable {
+    pub(crate) symbols: DashMap<&'static str, u32>,
+    pub(crate) ids: DashMap<u32, &'static str>,
+    key: AtomicU32,
+}
+impl Drop for SymbolTable {
+    fn drop(&mut self) {
+        for entry in self.ids.iter_mut() {
+            let key = entry.value();
+            unsafe {
+                let _ = Box::from_raw((*key) as *const _ as *mut str);
+            }
+        }
+        self.symbols.clear();
+        self.ids.clear();
+    }
+}
+
+impl Default for SymbolTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl SymbolTable {
+    pub fn new() -> Self {
+        Self {
+            symbols: DashMap::with_capacity(0),
+            ids: DashMap::with_capacity(0),
+            key: AtomicU32::new(128),
+        }
+    }
+
+    pub fn description(&self, symbol: SymbolID) -> &'static str {
+        *self.ids.get(&symbol.0).unwrap()
+    }
+    pub fn intern(&self, val: impl AsRef<str>) -> SymbolID {
+        let string = val.as_ref();
+        if let Some(key) = self.symbols.get(string) {
+            return SymbolID(*key.value());
+        }
+
+        let string = Box::leak(string.to_string().into_boxed_str());
+        let make_new_key = || self.key.fetch_add(1, Ordering::Relaxed);
+        let key = *self
+            .symbols
+            .entry(string)
+            .or_insert_with(make_new_key)
+            .value();
+        self.ids.insert(key, string);
+        SymbolID(key)
+    }
+}
+
+#[no_mangle]
+#[doc(hidden)]
+pub static mut SYMBOL_TABLE: std::mem::MaybeUninit<SymbolTable> = std::mem::MaybeUninit::uninit();
+static mut LENGTH: Symbol = Symbol::Key(SymbolID(0));
+
+macro_rules! globals {
+    ($($id: ident $val: ident $ix: expr),*) => {
+       $( pub static $id: &'static str = stringify!($val);)*
+    };
+}
+builtin_symbols!(globals);
+macro_rules! intern_builtins {
+    ($($id: ident $val: ident $ix: expr),*) => {
+        let mut _symtab = symbol_table();
+        $(
+            _symtab.ids.insert($ix,$id);
+            _symtab.symbols.insert($id,$ix);
+        )*
+    };
+}
+static INIT: AtomicBool = AtomicBool::new(false);
+
+pub fn initialize_symbol_table() {
+    if INIT.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed) == Ok(false) {
+        unsafe {
+            SYMBOL_TABLE.as_mut_ptr().write(SymbolTable::new());
+            LENGTH = "length".intern();
+        }
+        builtin_symbols!(intern_builtins);
+    }
+}
+
+pub fn length_id() -> Symbol {
+    unsafe { LENGTH }
+}
+pub fn symbol_table() -> &'static SymbolTable {
+    unsafe { &*SYMBOL_TABLE.as_ptr() }
+}
+pub trait Internable {
+    fn intern(&self) -> Symbol;
+}
+
+impl Internable for str {
+    fn intern(&self) -> Symbol {
+        Symbol::Key(symbol_table().intern(self))
+    }
+}
+
+impl Internable for &str {
+    fn intern(&self) -> Symbol {
+        (*self).intern()
+    }
+}
+
+impl Internable for String {
+    fn intern(&self) -> Symbol {
+        Symbol::Key(symbol_table().intern(self))
+    }
+}
+
+impl Internable for u32 {
+    fn intern(&self) -> Symbol {
+        Symbol::Index(*self)
+    }
+}
+
+impl Internable for usize {
+    fn intern(&self) -> Symbol {
+        if *self as u32 as usize == *self {
+            return (*self as u32).intern();
+        }
+        self.to_string().intern()
+    }
+}
+
+impl From<String> for Symbol {
+    fn from(s: String) -> Self {
+        s.intern()
+    }
+}
+impl From<&str> for Symbol {
+    fn from(s: &str) -> Self {
+        s.intern()
+    }
+}
+
+pub fn catch_trap<R>(vm: &mut VM, clos: impl FnOnce(&mut VM) -> R) -> Result<R, Value> {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| clos(vm)));
+    match result {
+        Ok(r) => Ok(r),
+        Err(x) if x.is::<VMTrap>() => {
+            let error = vm.vthis;
+
+            Err(error)
+        }
+        Err(e) => std::panic::resume_unwind(e),
+    }
+}

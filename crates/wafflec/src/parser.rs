@@ -8,6 +8,7 @@ pub enum SyntaxError {
     InvalidLiteral(Token),
     InvalidEscSeq(Spanned<char>),
     UnexpectedPattern(Spanned<Pattern>, String),
+    InvalidNew(Span),
     UnexpectedEof(Token),
     InvalidAssignment(SpanExpr),
     EmptyImport(Span),
@@ -18,6 +19,11 @@ pub type ParseResult<T> = Result<T, SyntaxError>;
 impl SyntaxError {
     pub fn report(&self, filename: String, file: &str) -> ReportBuilder<(String, Range<usize>)> {
         match self {
+            SyntaxError::InvalidNew(span) => {
+                Report::build(ReportKind::Error, &filename, span.start)
+                    .with_message("call expected after 'new'")
+                    .with_label(Label::new((filename.clone(), (*span).into())))
+            }
             SyntaxError::EmptyImport(span) => {
                 Report::build(ReportKind::Error, &filename, span.start)
                     .with_message("empty import")
@@ -147,7 +153,7 @@ impl<'input> Parser<'input> {
             Ok(token)
         }
     }
-
+    #[allow(dead_code)]
     fn consume_multiple(&mut self, expected: &[TokenKind]) -> ParseResult<Token> {
         let token = self.next()?;
         if expected.contains(&token.kind) {
@@ -185,6 +191,85 @@ impl<'input> Parser<'input> {
 pub type SpanExpr = Spanned<Expr>;
 
 impl Parser<'_> {
+    fn class(&mut self) -> ParseResult<Spanned<Expr>> {
+        let span = self.consume_next(TokenKind::Class)?.span;
+
+        let name = self.ident()?.node;
+        let params = self
+            .fn_params(TokenKind::Assign)?
+            .drain(..)
+            .map(|x| x.into_boxed_str())
+            .collect();
+        let class_expr = self.class_expr()?;
+        Ok(spanned!(
+            span.start..class_expr.span.end,
+            Expr::Class(name, params, Box::new(class_expr))
+        ))
+    }
+    fn class_expr(&mut self) -> ParseResult<Spanned<ClassExpr>> {
+        match self.peek() {
+            TokenKind::Object => self.parse_object(),
+            TokenKind::Let => self.parse_class_let(),
+            _ => Err(SyntaxError::UnexpectedToken {
+                expected: format!("class expression"),
+                got: self.next()?,
+            }),
+        }
+    }
+    fn parse_object(&mut self) -> ParseResult<Spanned<ClassExpr>> {
+        let span = self.consume_next(TokenKind::Object)?.span;
+        self.consume(TokenKind::BraceOpen)?;
+        let block = self.parse_list(TokenKind::Semicolon, TokenKind::BraceClose, |p| {
+            p.parse_class_field()
+        })?;
+        Ok(spanned!(
+            span.start..block.last().map(|x| x.span.end).unwrap_or_else(|| span.end),
+            ClassExpr::Object(block)
+        ))
+    }
+
+    fn parse_class_field(&mut self) -> ParseResult<Spanned<ClassField>> {
+        match self.peek() {
+            TokenKind::Inherit => {
+                let start = self.next()?.span;
+                let expr = self.expr()?;
+                let args = if self.peek() == TokenKind::Arrow {
+                    self.next()?;
+                    self.consume(TokenKind::ParenOpen)?;
+                    self.parse_list(TokenKind::Comma, TokenKind::ParenClose, |p| p.expr())?
+                } else {
+                    vec![]
+                };
+                Ok(spanned!(
+                    start.start..expr.span.end,
+                    ClassField::Inherit(Box::new(expr), args)
+                ))
+            }
+            TokenKind::Val => {
+                let start = self.next()?.span;
+                let name = self.ident()?;
+                self.consume(TokenKind::Assign)?;
+                let expr = self.expr()?;
+                Ok(spanned!(
+                    start.start..expr.span.end,
+                    ClassField::Val(name.node, Box::new(expr))
+                ))
+            }
+            TokenKind::Method => self.parse_method(),
+            TokenKind::Initializer => {
+                let start = self.next()?.span;
+                let expr = self.expr()?;
+                Ok(spanned!(
+                    start.start..expr.span.end,
+                    ClassField::Initializer(Box::new(expr))
+                ))
+            }
+            _ => Err(SyntaxError::UnexpectedToken {
+                expected: format!("class field"),
+                got: self.next()?,
+            }),
+        }
+    }
     pub fn expr(&mut self) -> ParseResult<SpanExpr> {
         match self.peek() {
             TokenKind::BraceOpen => {
@@ -233,6 +318,8 @@ impl Parser<'_> {
                     _ => self.parse_block(t.span),
                 }
             }
+
+            TokenKind::Class => return self.class(),
             TokenKind::Switch => return self.parse_switch(),
             TokenKind::If => {
                 let t = self.next()?;
@@ -343,6 +430,17 @@ impl Parser<'_> {
 
                 Ok(spanned!(t.span, Expr::Export(exports)))
             }
+            TokenKind::New => {
+                let t = self.next()?;
+                let e = self.expr_short()?;
+                let e = e.ok_or_else(|| SyntaxError::InvalidNew(t.span))?;
+                match e.node {
+                    Expr::Call(callee, args) | Expr::Apply(callee, args) => {
+                        Ok(spanned!(t.span.start..e.span.end, Expr::New(callee, args)))
+                    }
+                    _ => Err(SyntaxError::InvalidNew(t.span)),
+                }
+            }
             _ => {
                 if let Some(e) = self.expr_short()? {
                     Ok(e)
@@ -406,7 +504,6 @@ impl Parser<'_> {
             };
             parser.consume(TokenKind::Arrow)?;
             let then = parser.parse_block_switch(pat.span)?;
-            println!("then {}", then);
             last = then.span;
             Ok((pat, when, then))
         })?;
@@ -414,6 +511,99 @@ impl Parser<'_> {
         Ok(spanned!(
             l.span.start..last.end,
             Expr::Switch(Box::new(cond), cases, None)
+        ))
+    }
+
+    fn parse_class_let(&mut self) -> ParseResult<Spanned<ClassExpr>> {
+        let l = self.consume_next(TokenKind::Let)?;
+        let rec = if let TokenKind::Rec = self.peek() {
+            self.consume(TokenKind::Rec)?;
+            true
+        } else {
+            false
+        };
+        let mut defs = vec![];
+        let mut last;
+        let body = loop {
+            let name = self.parse_destructive_assignment()?;
+            match self.peek() {
+                TokenKind::ParenOpen => {
+                    self.advance();
+                    self.consume(TokenKind::ParenClose)?;
+                    self.consume(TokenKind::Assign)?;
+                    let body = self.expr()?;
+                    last = body.span;
+                    defs.push(spanned!(
+                        name.span.start..body.span.end,
+                        LetDef::Function(
+                            match name.node {
+                                Pattern::Ident(x) => x,
+                                _ =>
+                                    return Err(SyntaxError::UnexpectedPattern(
+                                        name,
+                                        "identifier".to_string(),
+                                    )),
+                            },
+                            vec![],
+                            Box::new(body)
+                        )
+                    ));
+                }
+                TokenKind::Assign => {
+                    self.advance();
+                    let expr = self.expr()?;
+                    last = expr.span;
+                    defs.push(spanned!(
+                        name.span.start..expr.span.end,
+                        LetDef::Variable(name, Box::new(expr))
+                    ));
+                }
+                TokenKind::Ident => {
+                    let params = self.fn_params(TokenKind::Assign)?;
+                    let body = self.expr()?;
+                    last = body.span;
+                    defs.push(spanned!(
+                        name.span.start..body.span.end,
+                        LetDef::Function(
+                            match name.node {
+                                Pattern::Ident(x) => x,
+                                _ =>
+                                    return Err(SyntaxError::UnexpectedPattern(
+                                        name,
+                                        "identifier".to_string(),
+                                    )),
+                            },
+                            params,
+                            Box::new(body)
+                        )
+                    ));
+                }
+                _ => {
+                    return Err(SyntaxError::UnexpectedToken {
+                        expected: format!("variable or function definition"),
+                        got: self.next()?,
+                    })
+                }
+            }
+
+            match self.peek() {
+                TokenKind::And => {
+                    self.advance();
+                    continue;
+                }
+                TokenKind::In => {
+                    self.advance();
+                    let e = self.class_expr()?;
+                    last = e.span;
+                    break Some(e);
+                }
+                _ => break None,
+            }
+        };
+
+        Ok(spanned!(
+            l.span.start..last.end,
+            ClassExpr::Let(defs, body.map(|x| Box::new(x)), rec)
         ))
     }
 
@@ -579,7 +769,10 @@ impl Parser<'_> {
                         .map_err(|_| { SyntaxError::InvalidLiteral(tok) })?
                 )
             )),
-            TokenKind::Str => Ok(spanned!(tok.span, Pattern::Str(self.text(tok).to_string()))),
+            TokenKind::Str => Ok(spanned!(
+                tok.span,
+                Pattern::Str(Self::parse_string(tok, self.text(tok))?)
+            )),
             TokenKind::Ident => {
                 if self.text(tok) == "_" {
                     Ok(spanned!(tok.span, Pattern::Default))
@@ -666,6 +859,20 @@ impl Parser<'_> {
         ))
     }
 
+    pub fn parse_method(&mut self) -> ParseResult<Spanned<ClassField>> {
+        let f = self.consume_next(TokenKind::Method)?;
+        let name = self.ident()?;
+        let params = self
+            .fn_params(TokenKind::Assign)?
+            .iter()
+            .map(|x| x.clone().into_boxed_str())
+            .collect();
+        let body = self.expr()?;
+        Ok(spanned!(
+            f.span.start..body.span.end,
+            ClassField::Method(name.node, params, Box::new(body))
+        ))
+    }
     // a b c ->
     pub fn fn_params(&mut self, ends_with: TokenKind) -> ParseResult<Vec<String>> {
         let mut params = vec![];

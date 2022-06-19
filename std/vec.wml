@@ -1,0 +1,63 @@
+let core = import std.core;
+let make capacity = {
+    let v = $new(null);
+    v.len = 0;
+    v.arr = $amake(capacity);
+    v
+};
+
+let from_array array = {
+    let v = $new(null);
+    v.len = $asize(array);
+    v.arr = array;
+    v
+};
+
+let get vec ix =
+    vec.arr[ix]
+
+let grow vec cap = {
+    let new_arr = $amake(cap);
+    let i = 0;
+    while i < vec.len {
+        new_arr[i] = vec.arr[i];
+        i = i + 1;
+    };
+    vec.arr = new_arr;
+};
+
+let push vec value = {
+    if vec.len >= $asize(vec.arr) then grow(vec, $asize(vec.arr) * 2);
+    vec.arr[vec.len] = value;
+    vec.len = vec.len + 1;
+};
+
+let pop vec = {
+    if vec.len == 0 then null 
+    else {
+        let v = vec.arr[vec.len - 1];
+        vec.len = vec.len - 1;
+        v
+    }
+};
+
+
+
+let string vec = {
+    let f = "["
+    and i = 0 in { 
+            while i < vec.len {
+                f = $string_concat(f,core.toString(vec.arr[i]));
+                if i != vec.len - 1 then 
+                    f = $string_concat(f,",");
+                i = i + 1
+            };  
+            f = $string_concat(f,"]");
+            f
+        }
+
+}
+
+export {
+    make, from_array, push, get, string, pop
+}

@@ -10,7 +10,7 @@ let _typeOf = [
     $symbol("module"),
     $symbol("function"),
     $symbol("primitive"),
-    $symbol("object"),
+    $symbol("obj"),
     $symbol("table"), 
     $symbol("symbol"),
     $symbol("abstract"),
@@ -37,24 +37,24 @@ let TByteBuffer = _typeOf[13];
 let TFFILibrary = _typeOf[14];
 let TFFIFunction = _typeOf[15];
 let TFFIPointer = _typeOf[16];
-let typeOf val = { _typeOf[$typeof(val)] }
+let typeOf v = { _typeOf[$typeof(v)] }
 
-let rec toString object = {
-    if typeOf object == TArray then 
-        let f = ""
+let rec toString obj = {
+    if typeOf obj == TArray then 
+        let f = "["
         and i = 0 in { 
-            while i < length object {
-                f = $string_concat(f,toString(object[i]));
-                if i != length(object) - 1 then 
+            while i < length obj {
+                f = $string_concat(f,toString(obj[i]));
+                if i != length(obj) - 1 then 
                     f = $string_concat(f,",");
                 i = i + 1
             };  
             f = $string_concat(f,"]");
             f
         }
-    else if typeOf object == TObject then 
+    else if typeOf obj == TObject then 
         let f = "{"
-        and fields = $ofields(object)
+        and fields = $ofields(obj)
         and i = 0 in {
             while i < length fields {
                 f = $string_concat(f,toString(fields[i][0]));
@@ -67,19 +67,19 @@ let rec toString object = {
             f = $string_concat(f,"}");
             f
         }
-    else if typeOf object == TByteBuffer then 
+    else if typeOf obj == TByteBuffer then 
         let f = "["
         and i = 0 in {
-            while i < $bsize(object) {
-                f = $string_concat(f, $bget(object, i));
-                if i != $bsize(object) - 1 then 
+            while i < $bsize(obj) {
+                f = $string_concat(f, $bget(obj, i));
+                if i != $bsize(obj) - 1 then 
                     f = $string_concat(f, ",");
                 i = i + 1
             };
             f = $string_concat(f,"]");
             f
         }
-    else $string(object)
+    else $string(obj)
 };
 
 

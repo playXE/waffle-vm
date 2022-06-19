@@ -1,7 +1,7 @@
 use std::{panic::AssertUnwindSafe, path::PathBuf};
 
 use waffle::{
-    gc_frame, load::waffle_default_loader, memory::minimark::MemoryError, value::Value, vm::VM,
+    gc_frame, load::waffle_default_loader, memory::minimark::MemoryError, value::Value, vm::{VM, Internable, self},
 };
 
 use clap::Parser;
@@ -21,6 +21,7 @@ pub enum Cli {
 }
 
 fn main() -> Result<(), String> {
+    vm::initialize_symbol_table();
     let cli = Cli::parse();
     match cli {
         Cli::Run { file: fname } => {
@@ -34,12 +35,12 @@ fn main() -> Result<(), String> {
 
             args[0] = Value::Str(vm.gc().str(fname.display().to_string()));
 
-            let key = Value::Symbol(vm.intern("loadmodule"));
-            let f = mload.field(vm, &key);
+            let key = "loadmodule".intern();
+            let f = mload.field(vm, key);
             let mut exc = None;
             let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 unsafe {
-                    vm.callex(mload.get(), f, &args.get(), &mut exc);
+                    vm.callex(mload.get_copy(), f, &args.get_copy(), &mut exc);
                 }
                 if let Some(exc) = exc {
                     eprintln!("exception thrown: {}", exc);

@@ -86,6 +86,7 @@ pub enum TokenKind {
     #[display(fmt = "true")]
     #[token("true")]
     True,
+
     #[display(fmt = "false")]
     #[token("false")]
     False,
@@ -116,6 +117,10 @@ pub enum TokenKind {
         lex.extras.pos.column += lex.slice().len();
     })]
     Builtin,
+
+    #[token("new")]
+    #[display(fmt = "new")]
+    New,
     #[display(fmt = "identifier")]
     // identifiers
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| {
@@ -273,6 +278,23 @@ pub enum TokenKind {
     Import,
     #[token("export")]
     Export,
+    #[token("method")]
+    Method,
+    #[token("inherit")]
+    #[display(fmt = "inherit")]
+    Inherit,
+    #[token("class")]
+    #[display(fmt = "class")]
+    Class,
+    #[token("object")]
+    #[display(fmt = "object")]
+    Object,
+    #[display(fmt = "val")]
+    #[token("val")]
+    Val,
+    #[display(fmt = "initializer")]
+    #[token("initializer")]
+    Initializer,
 }
 
 fn opt(x: &Option<impl ToString>) -> String {
@@ -287,6 +309,13 @@ fn join(vec: &[impl ToString]) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn join2(vec: &[impl ToString], sep: &str) -> String {
+    vec.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(sep)
 }
 use derive_more::Display;
 #[derive(Debug, Display, Clone, PartialEq)]
@@ -357,6 +386,29 @@ pub enum Expr {
     ImportStr(String),
     #[display(fmt = "export [{}]", "join(_0)")]
     Export(Vec<Export>),
+    #[display(fmt = "new {}({})", _0, "join(_1)")]
+    New(Box<Spanned<Expr>>, Vec<Spanned<Expr>>),
+    #[display(fmt = "class {} {} = {}", _0, "join(_1)", _2)]
+    Class(String, Vec<Box<str>>, Box<Spanned<ClassExpr>>),
+}
+
+#[derive(Debug, Display, Clone, PartialEq)]
+pub enum ClassExpr {
+    #[display(fmt = "{}", "print_let(_0,*_2,_1)")]
+    Let(Vec<Spanned<LetDef>>, Option<Box<Spanned<ClassExpr>>>, bool),
+    #[display(fmt = "object {{ {} }}", "join2(_0, \";\")")]
+    Object(Vec<Spanned<ClassField>>),
+}
+#[derive(Debug, Display, Clone, PartialEq)]
+pub enum ClassField {
+    #[display(fmt = "inherit {} ({})", _0, "join(_1)")]
+    Inherit(Box<Spanned<Expr>>, Vec<Spanned<Expr>>),
+    #[display(fmt = "val {} = {}", _0, _1)]
+    Val(String, Box<Spanned<Expr>>),
+    #[display(fmt = "method {} {} = {}", _0, "join(_1)", _2)]
+    Method(String, Vec<Box<str>>, Box<Spanned<Expr>>),
+    #[display(fmt = "initializer {}", _0)]
+    Initializer(Box<Spanned<Expr>>),
 }
 
 #[derive(Debug, Display, Clone, PartialEq)]
@@ -380,7 +432,11 @@ fn print_import(x: &[String]) -> String {
     f
 }
 
-fn print_let(defs: &[Spanned<LetDef>], rec: bool, body: &Option<Box<Spanned<Expr>>>) -> String {
+fn print_let<T: std::fmt::Display + std::fmt::Debug + Clone + PartialEq>(
+    defs: &[Spanned<LetDef>],
+    rec: bool,
+    body: &Option<Box<Spanned<T>>>,
+) -> String {
     let mut f = String::new();
     f.push_str("let ");
     if rec {

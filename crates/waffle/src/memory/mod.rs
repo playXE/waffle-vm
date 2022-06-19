@@ -8,6 +8,8 @@ pub mod minimark;
 pub mod minimarkpage;
 pub mod roots;
 pub mod roots_v2;
+pub mod map;
+pub mod array;
 //pub mod simple;
 //pub mod rose;
 #[macro_use]
@@ -266,14 +268,14 @@ pub trait Visitor {
     }
 }
 
-pub fn mark<T: Object + ?Sized>(vis: &mut dyn Visitor, root: &mut Gc<T>) {
+pub fn mark<T: Managed + ?Sized>(vis: &mut dyn Visitor, root: &mut Gc<T>) {
     vis.mark_object(&mut root.header);
 }
 
-pub fn mark_weak<T: Object + ?Sized>(vis: &mut dyn Visitor, root: &mut WeakRef<T>) {
+pub fn mark_weak<T: Managed + ?Sized>(vis: &mut dyn Visitor, root: &mut WeakRef<T>) {
     vis.mark_object(&mut root.value.header);
 }
 
-pub trait Object: Trace + Finalize {}
+pub trait Managed: Trace + Finalize {}
 
 pub mod tests;
