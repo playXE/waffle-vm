@@ -16,8 +16,25 @@ and size_t = 14
 and open = $ffi_open
 and call = $ffi_call
 and attach = $ffi_attach
-and attach_pointer = $ffi_attach_pointer in 
-    export {
-        void, pointer, double, float, i8, i16, i32, i64, u8, u16, u32, u64, string, byte_array, size_t, open,
-        call, attach, attach_pointer
-    }
+and attach_pointer = $ffi_attach_pointer
+
+class function handle = object {
+    val handle = handle;
+    method call args = $ffi_call handle args;
+};
+
+
+
+class library names = object {
+    val handle = $ffi_open names;
+
+    method attach name args rtype =  new function($ffi_attach(handle, name, args, rtype));
+    method attach_pointer name = $ffi_attach_pointer handle name;
+};
+
+
+
+export {
+    void, pointer, double, float, i8, i16, i32, i64, u8, u16, u32, u64, string, byte_array, size_t, open,
+    call, attach, attach_pointer, library, function
+}

@@ -20,7 +20,7 @@ use std::{
 
 pub struct VM {
     gc: GCWrapper,
-
+    pub(crate) acc: Value,
     pub(crate) sp: *mut Value,
     pub(crate) csp: *mut Value,
     pub(crate) vthis: Value,
@@ -112,6 +112,7 @@ unsafe impl Trace for VM {
             self.open_upvalues.trace(vis);
 
             self.global.trace(vis);
+            self.acc.trace(vis);
         }
     }
 }
@@ -166,6 +167,7 @@ impl VM {
         //let symtab_size = read_uint_from_env("WAFFLE_SYMTAB_SIZE").unwrap_or_else(|| 128);
         let mut this = Box::leak(Box::new(VM {
             gc: GCWrapper::new(),
+            acc: Value::UNDEFINED,
             env: Nullable::NULL,
             vthis: Value::Null,
             exc_stack: Value::Null,
@@ -219,7 +221,7 @@ impl VM {
         builtins.put(
             &mut this,
             "object".intern(),
-            Value::Object(proto.as_gc()),
+            Value::new(proto.as_gc()),
             false,
         );
         super::runtime::number::init(&mut this);
@@ -287,7 +289,7 @@ impl VM {
                         // uncaught or outside init stack, reraise
                         panic::resume_unwind(Box::new(VMTrap));
                     }
-
+                    println!("trap {}", *acc);
                     trap = self.spmax.cast::<u8>().sub(self.trap as _).cast::<Value>();
 
                     if trap < self.sp {
@@ -311,6 +313,7 @@ impl VM {
                     };
 
                     ip = trap.add(3).read().int() as usize;
+                    println!("ip {}", ip);
                     // if thrown from native code `module` is allowed to be null
                     module.set(trap.add(4).read().module());
                     // pop sp
@@ -340,16 +343,16 @@ impl VM {
         }
 
         self.sp
-            .write(Value::Int((self.csp as isize - self.spmin as isize) as _));
+            .write(Value::new((self.csp as isize - self.spmin as isize) as i32));
         self.sp.add(1).write(self.vthis);
         self.sp.add(2).write(if self.env.is_not_null() {
             Value::Abstract(self.env.as_gc().as_dyn())
         } else {
             Value::Null
         });
-        self.sp.add(3).write(Value::Int(0));
+        self.sp.add(3).write(Value::new(0));
         self.sp.add(4).write(Value::Null);
-        self.sp.add(5).write(Value::Int(self.trap as _));
+        self.sp.add(5).write(Value::new(self.trap as i32));
         self.trap = self.spmax as isize - self.sp as isize;
     }
     pub fn calln(&mut self, f: Value, args: &[Value]) -> Value {
@@ -450,9 +453,9 @@ impl VM {
                         self.csp.write(Value::Function(self.callback_ret.as_gc()));
 
                         self.csp = self.csp.add(1);
-                        self.csp.write(Value::Int(0));
+                        self.csp.write(Value::new(0));
                         self.csp = self.csp.add(1);
-                        self.csp.write(Value::Int(0));
+                        self.csp.write(Value::new(0));
                         self.csp = self.csp.add(1);
                         self.csp
                             .write(Value::encode_object_value(self.callback_mod.as_gc()));
@@ -486,6 +489,21 @@ impl VM {
         self.vthis = old_this.get_copy();
         self.env = old_env.get_copy();
         ret
+    }
+
+    pub fn construct(&mut self, object: Value, args: &[Value]) -> Value {
+        if let Some(object) = object.downcast_ref::<Object>() {
+            gc_frame!(self.gc().roots() => object = object, structure = *object.structure());
+            let c = self.id(Id::Constructor);
+            let ctor = object.get_method(self, c);
+
+            gc_frame!(self.gc().roots() => new_structure = structure.constructor_structure(self, object.nullable()));
+            let instance = (structure.instantiate())(self, &new_structure);
+
+            self.ocalln(Value::new(instance), ctor, args)
+        } else {
+            self.throw_str(format!("trying to create new instance of non object"))
+        }
     }
 
     unsafe fn process_trap(&mut self) {
@@ -556,6 +574,26 @@ impl VM {
 
         ret
     }
+
+    /// Dump stack to stdout
+    pub fn dump_stack(&self) {
+        unsafe {
+            let cspup = self.csp;
+            let mut csp = self.spmin.sub(1);
+
+            while csp != cspup {
+                let m = csp.add(4).read();
+                print!("Called from ");
+                if let Some(m) = m.downcast_ref::<Module>() {
+                    print!("{}", m.name);
+                } else {
+                    print!("a C function");
+                }
+
+                csp = csp.add(4);
+            }
+        }
+    }
 }
 
 use libloading_mini::Library;
@@ -617,23 +655,23 @@ unsafe impl Allocation for LibList {
 impl Managed for LibList {}
 
 pub const WAFFLE_TYPEOF: [Value; 17] = [
-    Value::Int(0),
-    Value::Int(1),
-    Value::Int(2),
-    Value::Int(3),
-    Value::Int(4),
-    Value::Int(5),
-    Value::Int(6),
-    Value::Int(7),
-    Value::Int(8),
-    Value::Int(9),
-    Value::Int(10),
-    Value::Int(11),
-    Value::Int(12),
-    Value::Int(13),
-    Value::Int(14),
-    Value::Int(15),
-    Value::Int(16),
+    Value::encode_int32(0),
+    Value::encode_int32(1),
+    Value::encode_int32(2),
+    Value::encode_int32(3),
+    Value::encode_int32(4),
+    Value::encode_int32(5),
+    Value::encode_int32(6),
+    Value::encode_int32(7),
+    Value::encode_int32(8),
+    Value::encode_int32(9),
+    Value::encode_int32(10),
+    Value::encode_int32(11),
+    Value::encode_int32(12),
+    Value::encode_int32(13),
+    Value::encode_int32(14),
+    Value::encode_int32(15),
+    Value::encode_int32(16),
 ];
 
 macro_rules! builtin_symbols {

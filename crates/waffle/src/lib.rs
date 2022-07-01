@@ -27,6 +27,7 @@ pub mod ffi;
 pub mod function;
 pub mod indexed_elements;
 pub mod interpreter;
+pub mod jit;
 pub mod linker;
 pub mod load;
 pub mod memory;

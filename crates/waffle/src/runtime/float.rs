@@ -44,7 +44,7 @@ pub static FLOAT_CLASS: &'static Class = &Class {
 pub fn init(vm: &mut VM) {
     let structure = Structure::new_unique_with_proto(vm, vm.global.number_prototype.into(), false);
     vm.global.int_structure = structure.nullable();
-    gc_frame!(vm.gc().roots() => object = Object::new(vm, &structure, &FLOAT_CLASS, Value::Int(0)));
+    gc_frame!(vm.gc().roots() => object = Object::new(vm, &structure, &FLOAT_CLASS, Value::new(0)));
     let f = make_prim(vm, constructor as _, 1, false);
     object.put(vm, "constructor", f, false);
 

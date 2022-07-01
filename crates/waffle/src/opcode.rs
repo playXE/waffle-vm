@@ -1,8 +1,5 @@
 use crate::{
-    memory::{
-        gcwrapper::{Gc, WeakRef},
-        Trace,
-    },
+    memory::{gcwrapper::WeakRef, Trace},
     object::Object,
     structure::{Structure, StructureChain},
     value::Value,
@@ -78,6 +75,7 @@ pub enum Op {
     CloseUpvalue,
     Swap,
     Super(u16, u32),
+    SpreadCall(u32),
     Last,
 }
 

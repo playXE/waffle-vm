@@ -4,8 +4,9 @@ use crate::class::Class;
 use crate::indexed_elements::{IndexedElements, MAX_VECTOR_SIZE};
 use crate::memory::array::ArrayStorage;
 use crate::memory::gcwrapper::Nullable;
+use crate::runtime::array::ARRAY_CLASS;
 use crate::structure::Structure;
-use crate::vm::{symbol_table, Internable, Symbol, VM};
+use crate::vm::{symbol_table, Id, Internable, Symbol, VM};
 use crate::{attributes::*, gc_frame, js_method_table};
 use crate::{
     memory::{gcwrapper::Gc, Finalize, Managed, Trace, Visitor},
@@ -405,7 +406,7 @@ impl Object {
         {
             slot.mark_put_result(PutResultType::IndexedOptimized, index);
             obj.define_own_indexe_value_dense_internal(ctx, index, val, false);
-
+            ctx.gc().write_barrier(*obj);
             return;
         }
 
@@ -539,7 +540,7 @@ impl Object {
                 let m = obj.get(ctx, $sym);
 
                 if m.is_function() {
-                    let res = ctx.ocall0(Value::Object(*obj), m);
+                    let res = ctx.ocall0(Value::new(*obj), m);
                     if res.is_primitive() || (res.is_null() || res.is_undefined()) {
                         return res;
                     }
@@ -703,7 +704,9 @@ impl Object {
             }
         }
 
-        obj.define_own_indexed_property_internal(ctx, index as _, desc, throwable)
+        let r = obj.define_own_indexed_property_internal(ctx, index as _, desc, throwable);
+        ctx.gc().write_barrier(*obj);
+        r
     }
 
     fn define_own_indexe_value_dense_internal(
@@ -766,6 +769,7 @@ impl Object {
                         desc.value(),
                         desc.is_value_absent(),
                     );
+
                     return true;
                 }
             } else {
@@ -852,7 +856,7 @@ impl Gc<Object> {
                     Hint::Number | Hint::None => Value::Str(ctx.gc().str("number")),
                     Hint::String => Value::Str(ctx.gc().str("string")),
                 };
-                ctx.ocall1(Value::Object(*self), *prim, hint)
+                ctx.ocall1(Value::new(*self), *prim, hint)
             }
             Err(_) => (self.class.method_table.DefaultValue)(self, ctx, hint),
         }
@@ -1805,4 +1809,15 @@ mod tests {
         let prop = obj.get(&mut vm, "b");
         assert_eq!(&**prop.str(), "hello!");
     }
+}
+
+pub fn array_length(vm: &mut VM, object: &mut Gc<Object>) -> usize {
+    if Object::is(object, ARRAY_CLASS) {
+        return object.indexed().length() as _;
+    }
+    let id = vm.id(Id::Length);
+
+    let length = object.get(vm, id);
+
+    length.to_length(vm)
 }

@@ -1,8 +1,4 @@
 #![allow(dead_code)]
-use crate::gc_frame;
-use crate::memory::gcwrapper::{Gc, Nullable};
-use crate::value::{Function, Module, Value};
-use crate::vm::{Internable, VM};
 
 use super::opcode::*;
 use std::collections::hash_map::Entry;
@@ -19,6 +15,7 @@ pub enum Global {
     Var(Box<str>),
     Func(isize, isize),
     Upval(Vec<(bool, u16)>),
+    Object,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -667,7 +664,7 @@ pub fn make_module(vm: &mut VM, globals: &[Rc<Global>], ops: &[Op]) -> Gc<Module
         for (i, g) in globals.iter().enumerate() {
             match &**g {
                 Global::Float(x) => m.globals[i] = Value::Float(f64::from_bits(*x)),
-                Global::Int(x) => m.globals[i] = Value::Int(*x as i32),
+                Global::Int(x) => m.globals[i] = Value::new(*x as i32),
                 Global::Str(x) => {
                     m.globals[i] = Value::Str(vm.gc().str(x));
                     vm.gc().write_barrier(m.get_copy());

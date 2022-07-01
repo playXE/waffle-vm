@@ -6,7 +6,8 @@ use crate::{
         map::Map,
         Finalize, Managed, Trace, Visitor,
     },
-    object::Object,
+    object::{Object, OBJECT_CLASS},
+    value::Value,
     vm::Symbol,
     vm::{DUMMY_SYMBOL, VM},
 };
@@ -205,6 +206,7 @@ pub struct Structure {
     pub(crate) has_been_flattened_before: bool,
     pub(crate) instance_structure: Option<Gc<Structure>>,
     pub(crate) cached_prototype_chain: Nullable<StructureChain>,
+    pub(crate) instantiate: Option<Instantiate>,
 }
 
 pub type StructureID = u32;
@@ -622,6 +624,7 @@ impl Structure {
             has_been_flattened_before: previous.has_been_flattened_before,
             instance_structure: previous.instance_structure,
             cached_prototype_chain: Nullable::NULL,
+            instantiate: previous.instantiate,
         })
     }
     #[allow(dead_code)]
@@ -655,6 +658,7 @@ impl Structure {
             transit_count: 0,
             instance_structure: None,
             cached_prototype_chain: Nullable::NULL,
+            instantiate: None,
         })
     }
 
@@ -680,6 +684,7 @@ impl Structure {
             transit_count: 0,
             instance_structure: None,
             cached_prototype_chain: Nullable::NULL,
+            instantiate: None,
         });
         this.calculated_size = this.get_slots_size() as _;
         this
@@ -739,6 +744,14 @@ impl Structure {
         }
         prototype.is_null() && cached_structure.is_null()
     }
+
+    pub fn instantiate(&self) -> Instantiate {
+        self.instantiate.unwrap_or_else(|| default_instantiate)
+    }
+
+    pub fn set_instantiate(&mut self, f: Instantiate) {
+        self.instantiate = Some(f);
+    }
 }
 
 pub struct StructureChain {
@@ -793,3 +806,10 @@ unsafe impl Trace for StructureChain {
 unsafe impl Finalize for StructureChain {}
 
 impl Managed for StructureChain {}
+
+/// Function to instantiate object from prototype
+pub type Instantiate = fn(&mut VM, &Gc<Structure>) -> Gc<Object>;
+
+pub fn default_instantiate(vm: &mut VM, structure: &Gc<Structure>) -> Gc<Object> {
+    Object::new(vm, structure, &OBJECT_CLASS, Value::Null)
+}

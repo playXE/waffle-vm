@@ -1,14 +1,24 @@
-let open = $file_open
-and read = $file_read
-and read_to_end = $file_read_to_end
-and write = $file_write
-and write_all = $file_write_all
-and flush = $file_flush
-and RO = 0
+let RO = 0
 and WO = 1
 and AO = 2
 and RW = 3
-and RA = 4 in 
-    export {
-        open, read, read_to_end, write, write_all, flush, RO, WO, AO, RW, RA
-    }
+and RA = 4
+class file name mode = object {
+    val handle = $file_open name mode;
+
+    method read buf = $file_read handle buf;
+    method read_to_end = $file_read_to_end handle;
+    method write buf = $file_write handle buf;
+    method write_all = $file_write_all handle buf;
+    method flush = $file_flush handle;
+};
+
+file.read_only = RO;
+file.write_only = WO;
+file.append_only = AO;
+file.read_write = RW;
+file.read_append = RA;
+
+export {
+    RO, WO, AO, RW, RA, file
+};

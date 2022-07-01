@@ -50,6 +50,9 @@ pub fn write_module(code: &[Op], globals: &[Rc<Global>]) -> Vec<u8> {
                         buf.write_u16::<LittleEndian>(*index as u16)?;
                     }
                 }
+                Global::Object => {
+                    buf.write_u8(7)?;
+                }
             }
         }
         let start = buf.position();
@@ -207,6 +210,10 @@ pub fn write_module(code: &[Op], globals: &[Rc<Global>]) -> Vec<u8> {
                     buf.write_u8(66)?;
                     buf.write_u16::<LittleEndian>(argc)?;
                 }
+                Op::SpreadCall(argc) => {
+                    buf.write_u8(67)?;
+                    buf.write_u32::<LittleEndian>(argc)?;
+                }
                 Op::Last => buf.write_u8(255)?,
                 _ => unreachable!(),
             }
@@ -283,6 +290,7 @@ pub fn read_module<T: AsRef<[u8]>>(buf: &T) -> (Vec<Op>, Vec<Rc<Global>>, u32) {
                     }
                     globals.push(Rc::new(Global::Upval(upvals)))
                 }
+                7 => globals.push(Rc::new(Global::Object)),
                 _ => todo!(),
             }
         }
@@ -450,6 +458,10 @@ pub fn read_module<T: AsRef<[u8]>>(buf: &T) -> (Vec<Op>, Vec<Rc<Global>>, u32) {
                     let fdbk = feedback;
                     feedback += 1;
                     Super(argc, fdbk)
+                }
+                67 => {
+                    let argc = buf.read_u32::<LittleEndian>()?;
+                    SpreadCall(argc)
                 }
                 255 => Last,
                 x => unreachable!("{}", x),

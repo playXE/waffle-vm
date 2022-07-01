@@ -84,6 +84,11 @@ pub fn do_link(
                     k
                 }
             }
+            Global::Object => {
+                let k = ctx.globals.len();
+                ctx.globals.push(g.clone());
+                k
+            }
         })
         .collect::<Vec<_>>();
 

@@ -1,4 +1,5 @@
 use crate::opcode::*;
+use crate::runtime::array::new_array;
 use crate::{
     gc_frame,
     memory::{gcwrapper::*, roots::*},
@@ -7,6 +8,7 @@ use crate::{
     value::*,
     vm::*,
 };
+use std::intrinsics::likely;
 use std::mem::transmute;
 use Op::*;
 mod slow_paths;
@@ -180,7 +182,7 @@ pub(crate) fn interp_loop(
     macro_rules! push_infos {
         ($ctor: expr) => {
             csp = csp.add(1);
-            csp.write(Value::Int(ip as _));
+            csp.write(Value::new(ip as i32));
 
             csp = csp.add(1);
             csp.write(if vm.env.is_not_null() {
@@ -221,6 +223,7 @@ pub(crate) fn interp_loop(
         };
     }
 
+    #[allow(unused_macros)]
     macro_rules! object_op {
         ($obj: expr,$param: expr,$id: expr,$err: expr) => {
             let id = stringify!($id).intern();
@@ -232,7 +235,7 @@ pub(crate) fn interp_loop(
                     save!();
                     let mut p = [*$param];
                     gc_frame!(vm.gc().roots() => p: [Value;1]);
-                    acc.set(vm.callex(Value::Object(*$obj), f, p.as_ref(),&mut None));
+                    acc.set(vm.callex(Value::new(*$obj), f, p.as_ref(),&mut None));
                     restore!();
                     pop_infos!(false);
                 }
@@ -277,7 +280,7 @@ pub(crate) fn interp_loop(
                         vm.vthis = $cur_this;
                         vm.env = func.env;
                         // store number of arguments in accumulator register
-                        acc.set(Value::Int($nargs as _));
+                        acc.set(Value::new($nargs as i32));
                     } else {
                         let prim = func;
 
@@ -309,7 +312,7 @@ pub(crate) fn interp_loop(
     macro_rules! intop {
         ($op: tt) => {{
             match (acc.get_copy(),sp.read()) {
-                (x,y) if x.is_int32() && y.is_int32() => { acc.set(Value::Int(x.get_int32() $op y.get_int32())); },
+                (x,y) if x.is_int32() && y.is_int32() => { acc.set(Value::new(x.get_int32() $op y.get_int32())); },
                 _ => vm.throw_str(concat!("incompatible types for '", stringify!($op), "'"))
             }
             sp.write(Value::Null);
@@ -320,14 +323,8 @@ pub(crate) fn interp_loop(
         unsafe {
             let op = m.get_copy()[ip];
             let op = std::mem::transmute::<_, Op>(op);
-            let mut stack = vec![];
-
-            let mut tmp = sp;
-            while tmp < vm.spmax {
-                stack.push(tmp.read());
-                tmp = tmp.add(1);
-            }
             ip += 1;
+
             stack_valid!();
             match op {
                 AccNull => {
@@ -344,7 +341,7 @@ pub(crate) fn interp_loop(
                     acc.set(vm.vthis);
                 }
                 AccInt(int) => {
-                    acc.set(Value::Int(int as i32));
+                    acc.set(Value::new(int as i32));
                 }
                 AccStack(ix) => {
                     acc.set(sp.offset(ix as _).read());
@@ -537,23 +534,6 @@ pub(crate) fn interp_loop(
                         test!(>=);
                     }
                 }
-                Add => {
-                    let rhs = acc.get_copy();
-                    let lhs = sp.read();
-                    if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(lhs.get_int32().wrapping_add(rhs.get_int32())));
-                        pop!(1);
-                    } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Float(lhs.get_number() + rhs.get_number()));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Object>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Object>);
-                        object_op!(obj, acc.as_ref(), __add);
-                        pop!(1);
-                    } else {
-                        vm.throw_str(&format!("wrong operands for +: {} {}", acc.get_copy(), *sp));
-                    }
-                }
 
                 Bool => {
                     let v = acc.get_copy();
@@ -573,152 +553,111 @@ pub(crate) fn interp_loop(
                     }
                 }
 
+                Add => {
+                    let rhs = acc.get_copy();
+                    let lhs = sp.read();
+
+                    if likely(lhs.is_int32() && rhs.is_int32()) {
+                        acc.set(Value::new(lhs.get_int32().wrapping_add(rhs.get_int32())));
+                    } else if lhs.is_number() && rhs.is_number() {
+                        acc.set(Value::new(lhs.get_number() + rhs.get_number()));
+                    } else {
+                        acc.set(slow_paths::add_slow(vm, lhs, rhs));
+                    }
+                    pop!(1);
+                }
+
                 Sub => {
                     let rhs = acc.get_copy();
                     let lhs = sp.read();
-                    if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(lhs.get_int32().wrapping_sub(rhs.get_int32())));
-                        pop!(1);
+
+                    if likely(lhs.is_int32() && rhs.is_int32()) {
+                        acc.set(Value::new(lhs.get_int32().wrapping_sub(rhs.get_int32())));
                     } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Float(lhs.get_number() - rhs.get_number()));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Object>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Object>);
-                        object_op!(obj, acc.as_ref(), __sub);
-                        pop!(1);
+                        acc.set(Value::new(lhs.get_number() - rhs.get_number()));
                     } else {
-                        vm.throw_str(&format!("wrong operands for -: {} {}", acc.get_copy(), *sp));
+                        acc.set(slow_paths::sub_slow(vm, lhs, rhs));
                     }
+                    pop!(1);
                 }
 
                 Div => {
                     let rhs = acc.get_copy();
                     let lhs = sp.read();
-                    if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(lhs.get_int32().wrapping_div(rhs.get_int32())));
-                        pop!(1);
+
+                    if likely(lhs.is_int32() && rhs.is_int32()) {
+                        acc.set(Value::new(lhs.get_int32().wrapping_div(rhs.get_int32())));
                     } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Float(lhs.get_number() / rhs.get_number()));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Object>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Object>);
-                        object_op!(obj, acc.as_ref(), __div);
-                        pop!(1);
+                        acc.set(Value::new(lhs.get_number() / rhs.get_number()));
                     } else {
-                        vm.throw_str(&format!("wrong operands for /: {} {}", acc.get_copy(), *sp));
+                        acc.set(slow_paths::div_slow(vm, lhs, rhs));
                     }
+                    pop!(1);
                 }
 
                 Mul => {
                     let rhs = acc.get_copy();
                     let lhs = sp.read();
-                    if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(lhs.get_int32().wrapping_mul(rhs.get_int32())));
-                        pop!(1);
+
+                    if likely(lhs.is_int32() && rhs.is_int32()) {
+                        acc.set(Value::new(lhs.get_int32().wrapping_mul(rhs.get_int32())));
                     } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Float(lhs.get_number() * rhs.get_number()));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Object>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Object>);
-                        object_op!(obj, acc.as_ref(), __mul);
-                        pop!(1);
+                        acc.set(Value::new(lhs.get_number() * rhs.get_number()));
                     } else {
-                        vm.throw_str(&format!("wrong operands for *: {} {}", acc.get_copy(), *sp));
+                        acc.set(slow_paths::mul_slow(vm, lhs, rhs));
                     }
+                    pop!(1);
                 }
 
                 Mod => {
                     let rhs = acc.get_copy();
                     let lhs = sp.read();
-                    if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(lhs.get_int32().wrapping_rem(rhs.get_int32())));
-                        pop!(1);
+
+                    if likely(lhs.is_int32() && rhs.is_int32()) {
+                        acc.set(Value::new(lhs.get_int32().wrapping_rem(rhs.get_int32())));
                     } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Float(lhs.get_number() % rhs.get_number()));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Object>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Object>);
-                        object_op!(obj, acc.as_ref(), __mod);
-                        pop!(1);
+                        acc.set(Value::new(lhs.get_number() % rhs.get_number()));
                     } else {
-                        vm.throw_str(&format!("wrong operands for %: {} {}", acc.get_copy(), *sp));
+                        acc.set(slow_paths::rem_slow(vm, lhs, rhs));
                     }
+                    pop!(1);
                 }
                 Shl => {
                     let rhs = acc.get_copy();
                     let lhs = sp.read();
                     if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(
+                        acc.set(Value::new(
                             lhs.get_int32().wrapping_shl(rhs.get_int32() as _),
                         ));
-                        pop!(1);
-                    } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Int(
-                            (lhs.get_number() as i32).wrapping_shl(rhs.get_number() as _),
-                        ));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Object>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Object>);
-                        object_op!(obj, acc.as_ref(), __shl);
-                        pop!(1);
                     } else {
-                        vm.throw_str(&format!(
-                            "wrong operands for <<: {} {}",
-                            acc.get_copy(),
-                            *sp
-                        ));
+                        acc.set(slow_paths::shl_slow(vm, lhs, rhs));
                     }
+                    pop!(1);
                 }
 
                 Shr => {
                     let rhs = acc.get_copy();
                     let lhs = sp.read();
                     if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(
+                        acc.set(Value::new(
                             lhs.get_int32().wrapping_shr(rhs.get_int32() as _),
                         ));
-                        pop!(1);
-                    } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Int(
-                            (lhs.get_number() as i32).wrapping_shr(rhs.get_number() as _),
-                        ));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Object>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Object>);
-                        object_op!(obj, acc.as_ref(), __shr);
-                        pop!(1);
                     } else {
-                        vm.throw_str(&format!(
-                            "wrong operands for >>: {} {}",
-                            acc.get_copy(),
-                            *sp
-                        ));
+                        acc.set(slow_paths::shr_slow(vm, lhs, rhs));
                     }
+                    pop!(1);
                 }
                 UShr => {
                     let rhs = acc.get_copy();
                     let lhs = sp.read();
                     if lhs.is_int32() && rhs.is_int32() {
-                        acc.set(Value::Int(
+                        acc.set(Value::new(
                             ((lhs.get_int32() as u32).wrapping_shl(rhs.get_int32() as _)) as i32,
                         ));
-                        pop!(1);
-                    } else if lhs.is_number() && rhs.is_number() {
-                        acc.set(Value::Int(
-                            (lhs.get_number() as u32).wrapping_shl(rhs.get_number() as _) as i32,
-                        ));
-                        pop!(1);
-                    } else if let Some(mut obj) = lhs.downcast_ref::<Object>() {
-                        gc_frame!(vm.gc().roots() => obj: Gc<Object>);
-                        object_op!(obj, acc.as_ref(), __ushr);
-                        pop!(1);
                     } else {
-                        vm.throw_str(&format!(
-                            "wrong operands for <<: {} {}",
-                            acc.get_copy(),
-                            *sp
-                        ));
+                        acc.set(slow_paths::ushr_slow(vm, lhs, rhs));
                     }
+                    pop!(1);
                 }
 
                 Compare => {
@@ -740,7 +679,7 @@ pub(crate) fn interp_loop(
                 Or => {
                     match (acc.get_copy(), sp.read()) {
                         (x, y) if x.is_int32() && y.is_int32() => {
-                            acc.set(Value::Int(x.get_int32() | y.get_int32()));
+                            acc.set(Value::new(x.get_int32() | y.get_int32()));
                         }
                         (x, y) if x.is_bool() && y.is_bool() => {
                             acc.set(Value::Bool(x.get_bool() | y.get_bool()));
@@ -755,7 +694,7 @@ pub(crate) fn interp_loop(
                 And => {
                     match (acc.get_copy(), sp.read()) {
                         (x, y) if x.is_int32() && y.is_int32() => {
-                            acc.set(Value::Int(x.get_int32() & y.get_int32()));
+                            acc.set(Value::new(x.get_int32() & y.get_int32()));
                         }
                         (x, y) if x.is_bool() && y.is_bool() => {
                             acc.set(Value::Bool(x.get_bool() & y.get_bool()));
@@ -808,7 +747,7 @@ pub(crate) fn interp_loop(
                                             acc.set(*object.direct(offset as _));
                                         }
                                         GetByIdMode::ArrayLength => {
-                                            acc.set(Value::Int(object.indexed().length() as _));
+                                            acc.set(Value::new(object.indexed().length() as i32));
                                         }
                                     }
                                     continue;
@@ -928,22 +867,24 @@ pub(crate) fn interp_loop(
                 }
 
                 Trap(ix) => {
+                    ip -= 1;
                     sp = sp.sub(6);
-                    sp.write(Value::Int(vm.csp as i32 - vm.spmin as i32));
+                    sp.write(Value::new(vm.csp as i32 - vm.spmin as i32));
                     sp.add(1).write(vm.vthis);
                     sp.add(2).write(if vm.env.is_not_null() {
                         Value::Abstract(vm.env.as_gc().as_dyn())
                     } else {
                         Value::Null
                     });
-                    sp.add(3).write(Value::Int(ip as i32 + ix as i32));
+                    sp.add(3).write(Value::new(ip as i32 + ix as i32));
                     sp.add(4).write(if m.is_null() {
                         Value::Null
                     } else {
                         Value::encode_object_value(m.as_gc())
                     });
-                    sp.add(5).write(Value::Int(vm.trap as _));
+                    sp.add(5).write(Value::new(vm.trap as i32));
                     vm.trap = vm.spmax as isize - sp as isize;
+                    ip += 1;
                     //       println!("SET TRAP {:x} {:p}", vm.trap, sp);
                 }
                 EndTrap => {
@@ -972,7 +913,9 @@ pub(crate) fn interp_loop(
                 }
                 MakeEnv(n) => {
                     let mut func = acc.get_copy().prim_or_func();
-                    let mut upvals = func.module.globals[n as usize].array();
+                    let mut upvals = func.module.globals[n as usize]
+                        .downcast_ref::<Array<Value>>()
+                        .unwrap_unchecked();
                     let mut real_upvals = vm.gc().array(upvals.len(), Nullable::NULL);
                     gc_frame!(vm.gc().roots() => func: Gc<Function>, upvals: Gc<Array<Value>>, real_upvals: Gc<Array<Nullable<Upvalue>>>);
 
@@ -1022,17 +965,16 @@ pub(crate) fn interp_loop(
                 }
 
                 MakeArray(mut n) => {
-                    let mut arr = vm.gc().array(n as usize + 1, Value::Null);
+                    gc_frame!(vm.gc().roots() => arr = new_array(vm, n as usize + 1));
                     while n != 0 {
-                        arr[n as usize] = sp.read();
+                        arr.put(vm, Symbol::Index(n as _), sp.read(), false);
                         sp.write(Value::Null);
                         sp = sp.add(1);
                         n -= 1;
                     }
-                    arr[0] = acc.get_copy();
-                    vm.gc().write_barrier(arr);
+                    arr.put(vm, Symbol::Index(0), acc.get_copy(), false);
 
-                    acc.set(Value::Array(arr));
+                    acc.set(Value::new(*arr));
                 }
 
                 TypeOf => {
@@ -1107,13 +1049,13 @@ pub(crate) fn interp_loop(
                     }
                     gc_frame!(vm.gc().roots() => structure = *class.structure(), class = class, constructor = constructor);
 
-                    gc_frame!(vm.gc().roots() => structure = structure.constructor_structure(vm, class.nullable()));
+                    gc_frame!(vm.gc().roots() => new_structure = structure.constructor_structure(vm, class.nullable()));
 
-                    gc_frame!(vm.gc().roots() => base = Object::new(vm,&structure,OBJECT_CLASS,Value::Null));
+                    gc_frame!(vm.gc().roots() => base = (structure.instantiate())(vm, &new_structure));
 
                     acc.set(constructor.get_copy());
 
-                    do_call!(Value::Object(base.get_copy()), argc, true);
+                    do_call!(Value::new(base.get_copy()), argc, true);
                 }
                 Super(argc, fdbk) => {
                     if !acc.is_obj() {
@@ -1197,13 +1139,14 @@ pub(crate) fn interp_loop(
 
                     acc.set(constructor);
 
-                    do_call!(Value::Object(tmp.get_copy()), argc, true);
+                    do_call!(Value::new(tmp.get_copy()), argc, true);
                 }
                 Hash => {
                     save!();
                     let hash = value_hash(vm, &*acc);
                     acc.set(hash);
                 }
+
                 Apply(_) => todo!(),
                 JumpTable(_) => todo!(),
 

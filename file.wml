@@ -1,11 +1,2 @@
-class point2d x y = object {
-    val x = x;
-    val y = y;
-};
-
-class point3d x y z = object {
-    inherit point2d -> (x, y);
-    val z = z;
-};
-
-let p = new point3d 1 2 3;
+let a = 5;
+$print(a);

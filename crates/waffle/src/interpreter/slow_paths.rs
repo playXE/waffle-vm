@@ -17,7 +17,7 @@ pub fn slow_acc_field(
             mode: GetByIdMode::ArrayLength,
         };
         vm.gc().write_barrier(module.feedback.as_gc());
-        return Value::Int(object.indexed().length() as _);
+        return Value::new(object.indexed().length() as i32);
     }
     gc_frame!(vm.gc().roots() => slot = Slot::new());
     let found = object.get_property_slot(vm, name, &mut slot);
@@ -108,4 +108,95 @@ pub fn slow_set_field(
             }
         }
     }
+}
+
+#[cold]
+pub fn add_slow(vm: &mut VM, lhs: Value, rhs: Value) -> Value {
+    gc_frame!(vm.gc().roots() => lhs = lhs, rhs = rhs);
+    if lhs.is_str() || rhs.is_str() {
+        let lhs = lhs.format(vm);
+        let rhs = rhs.format(vm);
+
+        return Value::new(vm.gc().str(format!("{}{}", lhs, rhs)));
+    }
+
+    let lhs = lhs.to_number(vm);
+    let rhs = rhs.to_number(vm);
+
+    Value::new(lhs + rhs)
+}
+
+#[cold]
+pub fn sub_slow(vm: &mut VM, lhs: Value, rhs: Value) -> Value {
+    gc_frame!(vm.gc().roots() => lhs = lhs, rhs = rhs);
+
+    let lhs = lhs.to_number(vm);
+    let rhs = rhs.to_number(vm);
+
+    Value::new(lhs - rhs)
+}
+
+#[cold]
+pub fn div_slow(vm: &mut VM, lhs: Value, rhs: Value) -> Value {
+    gc_frame!(vm.gc().roots() => lhs = lhs, rhs = rhs);
+
+    let lhs = lhs.to_number(vm);
+    let rhs = rhs.to_number(vm);
+
+    Value::new(lhs / rhs)
+}
+
+#[cold]
+pub fn mul_slow(vm: &mut VM, lhs: Value, rhs: Value) -> Value {
+    gc_frame!(vm.gc().roots() => lhs = lhs, rhs = rhs);
+
+    let lhs = lhs.to_number(vm);
+    let rhs = rhs.to_number(vm);
+
+    Value::new(lhs * rhs)
+}
+
+#[cold]
+pub fn rem_slow(vm: &mut VM, lhs: Value, rhs: Value) -> Value {
+    gc_frame!(vm.gc().roots() => lhs = lhs, rhs = rhs);
+
+    let lhs = lhs.to_number(vm);
+    let rhs = rhs.to_number(vm);
+
+    Value::new(lhs % rhs)
+}
+
+#[cold]
+pub fn shr_slow(vm: &mut VM, lhs: Value, rhs: Value) -> Value {
+    gc_frame!(vm.gc().roots() => lhs = lhs, rhs = rhs);
+
+    let lhs = lhs.to_number(vm) as i32;
+    let rhs = rhs.to_number(vm) as i32;
+
+    Value::new(lhs.wrapping_shr(rhs as _))
+}
+
+#[cold]
+pub fn shl_slow(vm: &mut VM, lhs: Value, rhs: Value) -> Value {
+    gc_frame!(vm.gc().roots() => lhs = lhs, rhs = rhs);
+
+    let lhs = lhs.to_number(vm) as i32;
+    let rhs = rhs.to_number(vm) as i32;
+
+    Value::new(lhs.wrapping_shl(rhs as _))
+}
+
+#[cold]
+pub fn ushr_slow(vm: &mut VM, lhs: Value, rhs: Value) -> Value {
+    gc_frame!(vm.gc().roots() => lhs = lhs, rhs = rhs);
+
+    let lhs = lhs.to_number(vm) as u32;
+    let rhs = rhs.to_number(vm) as u32;
+    let res = lhs.wrapping_shr(rhs);
+    let res = if res as i32 as u32 == res {
+        Value::new(res as i32)
+    } else {
+        Value::new(res as f64)
+    };
+    res
 }

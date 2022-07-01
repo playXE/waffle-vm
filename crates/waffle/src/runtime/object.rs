@@ -1,7 +1,6 @@
 use crate::{
     builtin::make_prim,
     gc_frame,
-    memory::gcwrapper::*,
     object::{Object, OBJECT_CLASS},
     structure::Structure,
     value::Value,
@@ -34,7 +33,7 @@ pub extern "C" fn object_set_prototype(vm: &mut VM, object: &Value, proto: &Valu
         let transition = structure.change_prototype_transition(vm, Some(new_prototype));
         *object.structure_mut() = transition;
         if structure.prototype().is_null() {
-            Value::Object(structure.prototype().as_gc())
+            Value::new(structure.prototype().as_gc())
         } else {
             Value::Null
         }
@@ -53,7 +52,7 @@ pub extern "C" fn object_prototype(vm: &mut VM, arg: &Value) -> Value {
     if proto.is_null() {
         Value::Null
     } else {
-        Value::Object(proto.as_gc())
+        Value::new(proto.as_gc())
     }
 }
 

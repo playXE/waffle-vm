@@ -51,7 +51,7 @@ pub fn init(vm: &mut VM) {
         gc_frame!(vm.gc().roots() => structure = Structure::new_unique_with_proto(vm, None, false));
         structure.change_prototype_with_no_transition(vm.global.object_prototype.as_gc());
 
-        gc_frame!(vm.gc().roots() => object = Object::new(vm, &structure, &NUMBER_CLASS, Value::Int(0)));
+        gc_frame!(vm.gc().roots() => object = Object::new(vm, &structure, &NUMBER_CLASS, Value::new(0)));
 
         let f = make_prim(vm, constructor as _, 1, false);
         object.put(vm, "constructor", f, false);
@@ -66,6 +66,6 @@ pub fn init(vm: &mut VM) {
     {
         gc_frame!(vm.gc().roots() => builtins = vm.builtins);
         let p = vm.global.number_prototype;
-        builtins.set_field(vm, "number".intern(), Value::Object(p.as_gc()));
+        builtins.set_field(vm, "number".intern(), Value::new(p.as_gc()));
     }
 }

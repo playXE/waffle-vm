@@ -12,6 +12,7 @@ use crate::{
     opcode::Feedback,
     opcode::Op,
     reflect::Global,
+    runtime::array::{array_iter, new_array},
     value::{Function, Module, Value},
     vm::{symbol_table, Id, Internable, Lib, LibList, Symbol, VM},
 };
@@ -42,7 +43,7 @@ pub fn read_module(
         let mut module = module.assume_init();
         gc_frame!(vm.gc().roots() => module: Gc<Module>);
         let exports = Object::new_empty(vm);
-        module.exports = Value::Object(exports);
+        module.exports = Value::new(exports);
         for (pos, global) in globals.iter().enumerate() {
             let val = match &**global {
                 Global::Func(pos, nargs) => {
@@ -57,12 +58,12 @@ pub fn read_module(
                         module: module.nullable(),
                         addr: *pos as usize,
                         prim: false,
-                        construct_struct: Nullable::NULL
+                        construct_struct: Nullable::NULL,
                     });
                     Value::Function(func)
                 }
                 Global::Float(x) => Value::Float(f64::from_bits(*x)),
-                Global::Int(x) => Value::Int(*x as i32),
+                Global::Int(x) => Value::new(*x as i32),
                 Global::Str(x) => Value::Str(vm.gc().str(x)),
                 Global::Symbol(x) => Value::Symbol(vm.gc().fixed(x.intern())),
                 Global::Var(_) => Value::Null,
@@ -71,9 +72,12 @@ pub fn read_module(
                     for i in 0..upvals.len() {
                         let (local, ix) = upvals[i];
                         let int = std::mem::transmute::<_, i32>([local as i16, ix as i16]);
-                        arr[i] = Value::Int(int);
+                        arr[i] = Value::new(int);
                     }
                     Value::Array(arr)
+                }
+                Global::Object => {
+                    Value::new(Object::new_empty(vm))
                 }
             };
             module.globals[pos] = val;
@@ -112,7 +116,7 @@ pub fn read_module(
     }
 }
 
-fn select_file(path: &[Value], mname: &str, ext: &str) -> Option<PathBuf> {
+fn select_file(path: &[String], mname: &str, ext: &str) -> Option<PathBuf> {
     if Path::new(&format!("{}{}", mname, ext)).exists() {
         return Some(PathBuf::from_str(&format!("{}{}", mname, ext)).unwrap());
     }
@@ -131,7 +135,7 @@ fn select_file(path: &[Value], mname: &str, ext: &str) -> Option<PathBuf> {
     None
 }
 
-fn open_module(path: &[Value], mname: &str) -> std::io::Result<Vec<u8>> {
+fn open_module(path: &[String], mname: &str) -> std::io::Result<Vec<u8>> {
     let fname = if mname.ends_with(".waffle") {
         select_file(path, mname, "")
     } else {
@@ -158,8 +162,12 @@ pub extern "C" fn load_module(vm: &mut VM, mname: &Value, vthis: &Value) -> Valu
         if let Some(module) = mv.downcast_ref::<Module>() {
             return module.exports;
         }
-        let path = o.field(vm, spath).array();
-
+        let mut path = vec![];
+        let arr = o.field(vm, spath);
+        array_iter(vm, arr, |_, _, val| {
+            path.push(val.to_string());
+            true
+        });
         let code = open_module(&*path, &format!("{}", mname))
             .unwrap_or_else(|err| vm.throw_str(format!("failed to open module: {}", err)));
         let (ops, globals, feedback) = crate::bytecode::read_module(&code);
@@ -191,7 +199,7 @@ const DYNLIB_POSTFIX: &'static str = ".dll";
 pub fn load_primitive(
     vm: &mut VM,
     liblist: &mut LibList,
-    path: &[Value],
+    path: &[String],
     prim: &Value,
     nargs: &Value,
 ) -> usize {
@@ -227,8 +235,6 @@ pub fn load_primitive(
                 lib = Some(&l.handle);
                 break;
             }
-
-            todo!()
         }
         if lib.is_none() {
             let file = select_file(path, dll, DYNLIB_POSTFIX)
@@ -280,9 +286,14 @@ pub extern "C" fn loader_loadprim(vm: &mut VM, prim: &Value, nargs: &Value) -> V
     };
 
     let spath = vm.id(Id::Path);
-    let mut path = o.field(vm, spath).array();
+    let mut path = vec![];
+    let arr = o.field(vm, spath);
+    array_iter(vm, arr, |_, _, val| {
+        path.push(val.to_string());
+        true
+    });
 
-    gc_frame!(vm.gc().roots() =>libs: Gc<LibList>,path: Gc<Array<Value>>);
+    gc_frame!(vm.gc().roots() =>libs: Gc<LibList>);
 
     let ptr = load_primitive(vm, &mut libs, &path, prim, nargs);
     let f = nargs.int();
@@ -295,7 +306,7 @@ pub extern "C" fn loader_loadprim(vm: &mut VM, prim: &Value, nargs: &Value) -> V
         module: Nullable::NULL,
         addr: ptr,
         prim: true,
-        construct_struct: Nullable::NULL
+        construct_struct: Nullable::NULL,
     });
     Value::Primitive(f)
 }
@@ -315,35 +326,34 @@ fn get_loader_path(vm: &mut VM) -> Value {
         .map(|x| x.display().to_string())
         .collect::<Vec<String>>();
 
-    let mut buf = vm.gc().array(paths.len(), Value::Null);
+    let mut buf = new_array(vm, paths.len());
     gc_frame!(vm.gc().roots() => buf: Gc<Array<Value>>);
     for (pos, path) in paths.iter().enumerate() {
-        buf[pos] = Value::Str(vm.gc().str(path));
-        vm.gc().write_barrier(buf.get_copy());
+        let str = Value::Str(vm.gc().str(path));
+        buf.put(vm, Symbol::Index(pos as _), str, false);
     }
 
-    Value::Array(buf.get_copy())
+    Value::new(*buf)
 }
 
 pub fn waffle_default_loader(vm: &mut VM) -> Value {
     let mut loader = Value::Null;
-    let mut args = vm.gc().array(std::env::args().len(), Value::Null);
-    gc_frame!(vm.gc().roots() => args: Gc<Array<Value>>,loader: Value);
+    let mut args = new_array(vm, std::env::args().len());
+    gc_frame!(vm.gc().roots() => args: Gc<Object>,loader: Value);
     for (pos, arg) in std::env::args().enumerate() {
         let arg = vm.gc().str(arg);
-        args[pos] = Value::Str(arg);
-        vm.gc().write_barrier(args.get_copy());
+        args.put(vm, Symbol::Index(pos as _), Value::Str(arg), false);
     }
-    loader.set(Value::Object(Object::new_empty(vm)));
+    loader.set(Value::new(Object::new_empty(vm)));
 
     let path = get_loader_path(vm);
     let pathk = vm.id(Id::Path);
     loader.set_field(vm, pathk, path);
     let obj = Object::new_empty(vm);
     let cache = vm.id(Id::Cache);
-    loader.set_field(vm, cache, Value::Object(obj));
+    loader.set_field(vm, cache, Value::new(obj));
     let kargs = "args".intern();
-    loader.set_field(vm, kargs, Value::Array(args.get_copy()));
+    loader.set_field(vm, kargs, Value::new(args.get_copy()));
     let mut f = make_prim(vm, load_module as _, 2, false);
     let s = "loadmodule".intern();
     gc_frame!(vm.gc().roots() => f: Value);

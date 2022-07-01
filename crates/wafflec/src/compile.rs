@@ -854,12 +854,9 @@ impl Compiler<'_, '_> {
         params: &[Box<str>],
         body: &Spanned<ClassExpr>,
     ) -> CompileResult<()> {
-        let g = self.ctx.global(Rc::new(Global::Symbol(
-            "object".to_string().into_boxed_str(),
-        )));
+        let g = self.ctx.global(Rc::new(Global::Object));
 
-        self.ctx.write(Op::AccBuiltin(g as _));
-        self.ctx.write(Op::New(0, 0));
+        self.ctx.write(Op::AccGlobal(g as _));
         let acc = self.ctx.add_var(name, true);
 
         match body.node {

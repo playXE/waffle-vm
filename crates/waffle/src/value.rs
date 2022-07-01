@@ -1,9 +1,10 @@
 pub use super::function::Function;
 use core::fmt;
-use fxhash::FxHasher64;
+use fxhash::{FxHasher32, FxHasher64};
 use memoffset::offset_of;
 use std::{
     hash::{Hash, Hasher},
+    intrinsics::{likely, unlikely},
     ops::{Deref, DerefMut, Index, IndexMut},
 };
 
@@ -15,7 +16,7 @@ use crate::{
     },
     object::{Hint, Object},
     opcode::{Feedback, Op},
-    vm::{symbol_table, Symbol},
+    vm::{symbol_table, Symbol, catch_trap},
     vm::{Internable, VM},
 };
 
@@ -112,9 +113,6 @@ impl Value {
         self.downcast_ref().unwrap()
     }
 
-    pub fn array(self) -> Gc<Array<Value>> {
-        self.downcast_ref().unwrap()
-    }
     pub fn module(self) -> Nullable<Module> {
         /*self.downcast_ref::<Module>()
         .map(|x| x.nullable())
@@ -124,7 +122,7 @@ impl Value {
         } else if let Some(m) = self.downcast_ref::<Module>() {
             m.nullable()
         } else {
-            if self.is_object() {
+            if self.is_cell() {
                 panic!("not an module: {:p} {}", self.get_object(), unsafe {
                     self.get_object().header.as_ref().tid().as_vtable.type_name
                 });
@@ -400,12 +398,12 @@ unsafe impl Finalize for Cell {}
 impl Managed for Cell {}
 
 pub fn value_hash(vm: &mut VM, value: &Value) -> Value {
-    let mut hasher = FxHasher64::default();
+    let mut hasher = FxHasher32::default();
     /*match value {
         Value::Null => {
             0i64.hash(&mut hasher);
         }
-        Value::Int(x) => {
+        Value::new(x) => {
             1i64.hash(&mut hasher);
             x.hash(&mut hasher);
         }
@@ -442,7 +440,7 @@ pub fn value_hash(vm: &mut VM, value: &Value) -> Value {
             let identity = vm.gc().identity(*obj);
             identity.hash(&mut hasher);
         }
-        Value::Object(obj) => {
+        Value::new(obj) => {
             9i64.hash(&mut hasher);
             let identity = vm.gc().identity(*obj);
             identity.hash(&mut hasher);
@@ -487,7 +485,7 @@ pub fn value_hash(vm: &mut VM, value: &Value) -> Value {
         id.hash(&mut hasher);
     }
 
-    Value::Int(hasher.finish() as _)
+    Value::new(hasher.finish() as i32)
 }
 
 fn icmp(x: i32, y: i32) -> i32 {
@@ -532,11 +530,11 @@ fn scmp(x: &str, y: &str) -> i32 {
 }
 
 pub fn value_cmp(vm: &mut VM, a: &Value, b: &Value) -> Value {
-    /*Value::Int(match (*a, *b) {
-        (Value::Int(x), Value::Int(y)) => icmp(x, y),
+    /*Value::new(match (*a, *b) {
+        (Value::new(x), Value::new(y)) => icmp(x, y),
         (Value::Float(x), Value::Float(y)) => fcmp(x, y),
-        (Value::Int(x), Value::Float(y)) => fcmp(x as f64, y),
-        (Value::Float(x), Value::Int(y)) => fcmp(x, y as f64),
+        (Value::new(x), Value::Float(y)) => fcmp(x as f64, y),
+        (Value::Float(x), Value::new(y)) => fcmp(x, y as f64),
         (Value::Str(x), Value::Str(y)) => scmp(&**x, &**y),
         (Value::Bool(x), Value::Bool(y)) => {
             if x == y {
@@ -550,7 +548,7 @@ pub fn value_cmp(vm: &mut VM, a: &Value, b: &Value) -> Value {
         (Value::Null, Value::Null) => 0,
         (Value::Primitive(a), Value::Primitive(b)) => vm.identity_cmp(a, b),
         (Value::Function(x), Value::Function(y)) => vm.identity_cmp(x, y),
-        (Value::Object(a), Value::Object(b)) => {
+        (Value::new(a), Value::new(b)) => {
             if vm.identity_cmp(a, b) == 0 {
                 0
             } else {
@@ -559,23 +557,23 @@ pub fn value_cmp(vm: &mut VM, a: &Value, b: &Value) -> Value {
                 if !matches!(tmp, Value::Function(_) | Value::Primitive(_)) {
                     INVALID_CMP
                 } else {
-                    let a = vm.call2(tmp, Value::Object(a), Value::Object(b));
+                    let a = vm.call2(tmp, Value::new(a), Value::new(b));
                     match a {
-                        Value::Int(x) => x,
+                        Value::new(x) => x,
                         _ => INVALID_CMP,
                     }
                 }
             }
         }
-        (Value::Object(a), b) => {
+        (Value::new(a), b) => {
             let s = vm.intern("__compare");
             let tmp = a.field(vm, &Value::Symbol(s));
             if !matches!(tmp, Value::Function(_) | Value::Primitive(_)) {
                 INVALID_CMP
             } else {
-                let a = vm.call2(tmp, Value::Object(a), b);
+                let a = vm.call2(tmp, Value::new(a), b);
                 match a {
-                    Value::Int(x) => x,
+                    Value::new(x) => x,
                     _ => INVALID_CMP,
                 }
             }
@@ -609,7 +607,7 @@ pub fn value_cmp(vm: &mut VM, a: &Value, b: &Value) -> Value {
             if !tmp.is_function() {
                 INVALID_CMP
             } else {
-                let a = vm.call2(tmp, Value::Object(a.get_copy()), Value::Object(b));
+                let a = vm.call2(tmp, Value::new(a.get_copy()), Value::new(b));
                 if a.is_int32() {
                     a.get_int32()
                 } else {
@@ -624,7 +622,7 @@ pub fn value_cmp(vm: &mut VM, a: &Value, b: &Value) -> Value {
         if !tmp.is_function() {
             INVALID_CMP
         } else {
-            let a = vm.call2(tmp, Value::Object(a.get_copy()), *b);
+            let a = vm.call2(tmp, Value::new(a.get_copy()), *b);
             if a.is_int32() {
                 a.get_int32()
             } else {
@@ -639,7 +637,7 @@ pub fn value_cmp(vm: &mut VM, a: &Value, b: &Value) -> Value {
         } else {
             INVALID_CMP
         }
-    } else if a.is_object() && b.is_object() {
+    } else if a.is_cell() && b.is_cell() {
         vm.identity_cmp(a.get_object(), b.get_object())
     } else {
         INVALID_CMP
@@ -687,7 +685,7 @@ impl fmt::Display for Value {
         } else if self.is_undefined() {
             write!(f, "undefined")
         } else {
-            assert!(self.is_object());
+            assert!(self.is_cell());
             write!(f, "<abstract {:p}>", self.get_object())
         }
         /*match self {
@@ -731,16 +729,19 @@ impl fmt::Debug for Value {
         } else if let Some(x) = self.downcast_ref::<Array<Value>>() {
             write!(f, "<array {:p}: {}>", x, x.len())
         } else {
-            assert!(self.is_object());
+            assert!(self.is_cell());
             write!(f, "<abstract {:p}>", self.get_object())
         }
     }
 }
 
 pub mod nanbox {
-    use crate::memory::{
-        gcwrapper::{Array, Gc, Str},
-        Managed, Trace,
+    use crate::{
+        memory::{
+            gcwrapper::{Array, Gc, Str},
+            Managed, Trace,
+        },
+        runtime::array::ARRAY_CLASS,
     };
 
     use super::{purenan::*, Function, Module, Symbol, Table};
@@ -971,13 +972,13 @@ pub mod nanbox {
 
         #[inline]
         pub fn get_object(self) -> Gc<dyn Managed> {
-            assert!(self.is_object());
+            assert!(self.is_cell());
 
             unsafe { std::mem::transmute(self.0.ptr) }
         }
 
         #[inline]
-        pub fn is_object(self) -> bool {
+        pub fn is_cell(self) -> bool {
             self.is_pointer() && !self.is_empty()
         }
         #[inline]
@@ -1105,7 +1106,7 @@ pub mod nanbox {
         }
 
         pub fn downcast_ref<T: 'static + Managed>(self) -> Option<Gc<T>> {
-            if self.is_object() {
+            if self.is_cell() {
                 self.get_object().downcast()
             } else {
                 None
@@ -1135,7 +1136,9 @@ pub mod nanbox {
         }
 
         pub fn is_array(self) -> bool {
-            self.downcast_ref::<Array<Value>>().is_some()
+            self.downcast_ref::<Object>()
+                .filter(|object| Object::is(&object, ARRAY_CLASS))
+                .is_some()
         }
         pub fn is_symbol(self) -> bool {
             self.downcast_ref::<Symbol>().is_some()
@@ -1154,7 +1157,7 @@ pub mod nanbox {
 
     unsafe impl Trace for Value {
         fn trace(&mut self, visitor: &mut dyn crate::memory::Visitor) {
-            if self.is_object() {
+            if self.is_cell() {
                 let mut obj = self.get_object();
                 obj.trace(visitor);
                 *self = Self::encode_object_value(obj);
@@ -1360,9 +1363,115 @@ impl Value {
         if let Some(obj) = self.downcast_ref::<Object>() {
             obj
         } else if self.is_int32() {
-            todo!()
+            crate::runtime::int::constructor(vm, &self).downcast_ref().unwrap()
+        } else if self.is_double() {
+            crate::runtime::float::constructor(vm, &self).downcast_ref().unwrap()
         } else {
             todo!("{}", self)
         }
+    }
+
+    pub fn try_to_object(self, vm: &mut VM) -> Result<Gc<Object>,Value>  {
+        catch_trap(vm, |vm| {
+            self.to_object(vm)
+        })
+    }
+
+    pub fn to_number(&self, vm: &mut VM) -> f64 {
+        if likely(self.is_double()) {
+            self.get_double()
+        } else if likely(self.is_int32()) {
+            self.get_int32() as _
+        } else if self.is_bool() {
+            self.get_bool() as i32 as f64
+        } else if self.is_null() {
+            0.0
+        } else if self.is_undefined() {
+            f64::from_bits(0x7ff8000000000000)
+        } else if let Some(mut object) = self.downcast_ref::<Object>() {
+            gc_frame!(vm.gc().roots() => object: Gc<Object>);
+            (object.class().method_table.DefaultValue)(&mut object, vm, Hint::Number).to_number(vm)
+        } else {
+            #[cold]
+            fn throw_err(vm: &mut VM, val: &Value) -> ! {
+                vm.throw_str(format!("cannot convert '{}' to number", val));
+            }
+            throw_err(vm, self)
+        }
+    }
+
+    pub fn to_integer(&self, vm: &mut VM) -> i32 {
+        if self.is_int32() {
+            return self.get_int32();
+        }
+        let number = self.to_number(vm);
+        if unlikely(number.is_nan() || number.is_infinite()) {
+            0
+        } else {
+            ((number as i64) & 0xffffffff) as i32
+        }
+    }
+
+    pub fn to_length(&self, vm: &mut VM) -> usize {
+        let len = self.to_integer(vm);
+        if len < 0 {
+            0
+        } else {
+            len as usize
+        }
+    }
+    #[inline]
+    pub fn new(val: impl Into<Self>) -> Self {
+        val.into()
+    }
+
+    pub fn format(self, vm: &mut VM) -> String {
+        if self.is_int32() {
+            return self.get_int32().to_string()
+        } else if self.is_double() {
+            return self.get_double().to_string()
+        } else if self.is_null() {
+            return "null".to_string()
+        } else if self.is_undefined() {
+            return "undefined".to_string();
+        } else if self.is_bool() {
+            return self.get_bool().to_string()
+        } else if let Some(str) = self.downcast_ref::<Str>() {
+            return str.to_string()
+        } else if let Some(sym) = self.downcast_ref::<Symbol>() {
+            return sym.description(symbol_table());
+        } else if let Some(object) = self.downcast_ref::<Object>() {
+            gc_frame!(vm.gc().roots() => object = object);
+            
+            // will trap if 'to_string' is not a method
+            let m = object.get_method(vm, "to_string".intern());
+
+            return vm.ocall0(self, m).format(vm)
+        } else {
+            assert!(self.is_cell(), "value is not a heap pointer");
+            format!("<abstract {:p}>", self)
+        }
+
+
+        
+
+    }
+}
+
+impl<T: ?Sized + Managed> Into<Value> for Gc<T> {
+    fn into(self) -> Value {
+        Value::encode_object_value(self)
+    }
+}
+
+impl Into<Value> for f64 {
+    fn into(self) -> Value {
+        Value::encode_untrusted_f64_value(self)
+    }
+}
+
+impl Into<Value> for i32 {
+    fn into(self) -> Value {
+        Value::encode_int32(self)
     }
 }

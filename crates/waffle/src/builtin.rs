@@ -1,7 +1,7 @@
 use crate::{
     gc_frame,
-    memory::gcwrapper::{Array, Gc, Nullable, Str},
-    object::Object,
+    memory::gcwrapper::{Gc, Nullable, Str},
+    object::{array_length, Object},
     value::{ByteBuffer, Function, Value},
     vm::Symbol,
     vm::{Internable, VM},
@@ -21,53 +21,6 @@ pub fn make_prim(vm: &mut VM, f: usize, nargs: usize, var: bool) -> Value {
     };
 
     Value::Primitive(vm.gc().fixed(prim))
-}
-
-pub fn builtin_array(vm: &mut VM, args: &[Value]) -> Value {
-    let mut a = vm.gc().array(args.len(), Value::Null);
-
-    for i in 0..args.len() {
-        a[i] = args[i];
-    }
-
-    Value::Array(a)
-}
-
-pub extern "C" fn builtin_amake(vm: &mut VM, size: &Value) -> Value {
-    let s = size.int();
-    Value::Array(vm.gc().array(s as _, Value::Null))
-}
-
-pub extern "C" fn builtin_amake2(vm: &mut VM, size: &Value, init: &Value) -> Value {
-    let s = size.int();
-    let mut arr = vm.gc().array(s as _, Value::Null);
-    for i in 0..s as usize {
-        arr[i] = *init;
-    }
-    Value::Array(arr)
-}
-
-pub extern "C" fn builtin_asize(vm: &mut VM, a: &Value) -> Value {
-    if !a.is_array() {
-        vm.throw_str("array expected");
-    }
-
-    let arr = a.array();
-    Value::Int(arr.len() as _)
-}
-
-pub extern "C" fn builtin_acopy(vm: &mut VM, a: &Value) -> Value {
-    if !a.is_array() {
-        vm.throw_str("array expected");
-    }
-
-    let arr = a.array();
-    let mut cpy = vm.gc().array(arr.len(), Value::Null);
-    for i in 0..arr.len() {
-        cpy[i] = arr[i];
-    }
-
-    Value::Array(cpy)
 }
 
 pub extern "C" fn builtin_full_gc(vm: &mut VM) -> Value {
@@ -98,7 +51,7 @@ pub extern "C" fn builtin_new(vm: &mut VM, val: &Value) -> Value {
         ));
     }
 
-    Value::Object(Object::new_empty(vm))
+    Value::new(Object::new_empty(vm))
 }
 
 /// $symbol: str | sym -> sym
@@ -122,7 +75,7 @@ pub extern "C" fn builtin_symbol(vm: &mut VM, val: &Value) -> Value {
 
 pub extern "C" fn builtin_ofields(vm: &mut VM, obj: &Value) -> Value {
     /*match obj {
-        Value::Object(ref object) => {
+        Value::new(ref object) => {
             let mut arr = vm.gc().array(object.table.count, Value::Null);
 
             gc_frame!(vm.gc().roots() => arr: Gc<Array<Value>>);
@@ -208,7 +161,7 @@ pub extern "C" fn builtin_string_concat(vm: &mut VM, x: &Value, y: &Value) -> Va
 }
 
 pub extern "C" fn builtin_string_length(vm: &mut VM, x: &Value) -> Value {
-    Value::Int(vm.expect_str(x).len() as _)
+    Value::new(vm.expect_str(x).len() as i32)
 }
 
 pub extern "C" fn builtin_print(_: &mut VM, x: &Value) -> Value {
@@ -228,21 +181,26 @@ pub fn alloc_buffer(vm: &mut VM, size: usize) -> Gc<ByteBuffer> {
 /// bmake: string | array<int> | int -> bytebuffer
 pub extern "C" fn builtin_bmake(vm: &mut VM, x: &Value) -> Value {
     if x.is_array() {
-        let mut arr = x.array();
+        let mut arr = x.downcast_ref::<Object>().unwrap();
         let mut buf = Nullable::<ByteBuffer>::NULL;
-        gc_frame!(vm.gc().roots() => arr: Gc<Array<Value>>,buf: Nullable<ByteBuffer>);
+        gc_frame!(vm.gc().roots() => arr: Gc<Object>,buf: Nullable<ByteBuffer>);
         let mut tmp = vec![];
-        for i in 0..arr.len() {
-            if !arr[i].is_int32() {
+        for i in 0..arr.indexed.length() {
+            let elem = arr.get(vm, Symbol::Index(i));
+            if !elem.is_int32() {
                 vm.throw_str("bmake: array of integers or string expected");
             }
-            tmp.push(arr[i].get_int32() as u8);
+            tmp.push(elem.get_int32() as u8);
         }
 
-        buf.set(alloc_buffer(vm, arr.len()).nullable());
+        buf.set(alloc_buffer(vm, arr.indexed().length() as _).nullable());
 
         unsafe {
-            core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf.data.as_mut_ptr(), arr.len());
+            core::ptr::copy_nonoverlapping(
+                tmp.as_ptr(),
+                buf.data.as_mut_ptr(),
+                arr.indexed().length() as _,
+            );
         }
         return Value::encode_object_value(buf.as_gc());
     } else if x.is_str() {
@@ -281,7 +239,7 @@ pub extern "C" fn builtin_bget(vm: &mut VM, x: &Value, at: &Value) -> Value {
             vm.throw_str("bget: int32 is expected as second argument");
         }
         let ix = at.get_int32() as u32 as usize;
-        Value::Int(buf[ix] as i32)
+        Value::new(buf[ix] as i32)
     } else {
         vm.throw_str("bget: bytebuffer expected as first argument");
     }
@@ -305,7 +263,7 @@ pub extern "C" fn builtin_bset(vm: &mut VM, x: &Value, at: &Value, val: &Value) 
 
 pub extern "C" fn builtin_bsize(vm: &mut VM, x: &Value) -> Value {
     if let Some(buf) = x.downcast_ref::<ByteBuffer>() {
-        Value::Int(buf.len() as _)
+        Value::new(buf.len() as i32)
     } else {
         vm.throw_str("bsize: bytebuffer expected")
     }
@@ -338,9 +296,13 @@ pub extern "C" fn builtin_typename(vm: &mut VM, x: &Value) -> Value {
 }
 
 use crate::ffi;
-pub extern "C" fn ffi_open(vm: &mut VM, args: &Gc<Array<Value>>) -> Value {
+pub extern "C" fn ffi_open(vm: &mut VM, args: &Value) -> Value {
     let mut paths = vec![];
-    for arg in args.iter() {
+
+    gc_frame!(vm.gc().roots() => args = args.downcast_ref::<Object>().unwrap_or_else(|| vm.throw_str("ffi_open expected array of library names") ));
+    let len = array_length(vm, &mut args);
+    for i in 0..len {
+        let arg = args.get(vm, Symbol::Index(i as _));
         if let Some(str) = arg.downcast_ref::<Str>() {
             paths.push(str.to_string());
         } else {
@@ -359,20 +321,24 @@ pub extern "C" fn ffi_attach(
     args: &Value,
     rtype: &Value,
 ) -> Value {
-    let lib = lib
+    gc_frame!(vm.gc().roots() => lib = lib
         .downcast_ref::<ffi::Library>()
-        .unwrap_or_else(|| vm.throw_str("ffi_attach: library expected"));
-    let name = name
+        .unwrap_or_else(|| vm.throw_str("ffi_attach: library expected")),
+    name = name
         .downcast_ref::<Str>()
-        .unwrap_or_else(|| vm.throw_str("ffi_attach: name expected"));
-    let args = args
-        .downcast_ref::<Array<Value>>()
-        .unwrap_or_else(|| vm.throw_str("array of arguments expected"));
+        .unwrap_or_else(|| vm.throw_str("ffi_attach: name expected")),
+    args = args
+        .downcast_ref::<Object>()
+        .unwrap_or_else(|| vm.throw_str("array of arguments expected")),
+    argsv = vec![]);
+    let len = array_length(vm, &mut args);
 
-    for arg in args.iter() {
+    for i in 0..len {
+        let arg = args.get(vm, Symbol::Index(i as _));
         if !arg.is_int32() {
-            vm.throw_str("argument must be an int32");
+            vm.throw_str("ffi_attach: expected int32 as FFI type");
         }
+        argsv.push(arg);
     }
     let rtype = if rtype.is_int32() {
         *rtype
@@ -380,8 +346,8 @@ pub extern "C" fn ffi_attach(
         vm.throw_str("rtype int32")
     };
     unsafe {
-        let func = ffi::Function::attach(&lib, &name, &args, rtype).unwrap_or_else(|err| {
-            vm.throw_str(format!("failed to attach function '{}': {}", &**name, err))
+        let func = ffi::Function::attach(&lib, &name, &argsv, rtype).unwrap_or_else(|err| {
+            vm.throw_str(format!("failed to attach function '{}': {}", &***name, err))
         });
         match func {
             Some(f) => Value::encode_object_value(vm.gc().fixed(f)),
@@ -393,12 +359,18 @@ pub extern "C" fn ffi_attach(
 pub extern "C" fn ffi_call(vm: &mut VM, func: &Value, args: &Value) -> Value {
     if let (Some(mut func), Some(mut args)) = (
         func.downcast_ref::<ffi::Function>(),
-        args.downcast_ref::<Array<Value>>(),
+        args.downcast_ref::<Object>(),
     ) {
-        gc_frame!(vm.gc().roots() => func: Gc<Function>,args: Gc<Array<Value>>);
+        gc_frame!(vm.gc().roots() => func: Gc<Function>,args: Gc<Object>);
         unsafe {
-            func.call(vm, &*args)
-                .unwrap_or_else(|err| vm.throw_str(err))
+            let len = array_length(vm, &mut args);
+            gc_frame!(vm.gc().roots() => argv = Vec::with_capacity(len));
+            for i in 0..len {
+                let arg = args.get(vm, Symbol::Index(i as _));
+
+                argv.push(arg);
+            }
+            func.call(vm, &argv).unwrap_or_else(|err| vm.throw_str(err))
         }
     } else {
         vm.throw_str("ffi_call: invalid arguments")
@@ -464,7 +436,7 @@ pub extern "C" fn file_read(vm: &mut VM, file: &Value, buff: &Value) -> Value {
 
     match file.read(&mut **buff) {
         Err(e) => vm.throw_str(format!("failed to read from file: {}", e)),
-        Ok(nread) => Value::Int(nread as _),
+        Ok(nread) => Value::new(nread as i32),
     }
 }
 
@@ -484,11 +456,11 @@ pub extern "C" fn file_write(vm: &mut VM, file: &Value, buf: &Value) -> Value {
     let mut file = vm.expect::<File, _>(file, "file expected");
     if let Some(buf) = buf.downcast_ref::<ByteBuffer>() {
         file.write(&*buf)
-            .map(|c| Value::Int(c as _))
+            .map(|c| Value::new(c as i32))
             .unwrap_or_else(|err| vm.throw_str(format!("failed to write bytes to file: {}", err)))
     } else if let Some(buf) = buf.downcast_ref::<Str>() {
         file.write(buf.as_bytes())
-            .map(|c| Value::Int(c as _))
+            .map(|c| Value::new(c as i32))
             .unwrap_or_else(|err| vm.throw_str(format!("failed to write bytes to file: {}", err)))
     } else {
         vm.throw_str("string or bytebuffer expected")
@@ -521,7 +493,7 @@ pub extern "C" fn file_seek(vm: &mut VM, file: &Value, offset: &Value) -> Value 
 
     let result = file
         .seek(seek)
-        .map(|x| Value::Int(x as _))
+        .map(|x| Value::new(x as i32))
         .unwrap_or_else(|err| vm.throw_str(format!("seek failed: {}", err)));
     result
 }
@@ -537,31 +509,6 @@ pub(crate) fn init_builtin(vm: &mut VM) {
     let mut obj = Object::new_empty(vm); // we do not want to relocate this table, less garbage to cleanup
 
     gc_frame!(vm.gc().roots() => obj: Gc<Object>);
-
-    let f = make_prim(vm, builtin_acopy as _, 1, false);
-    let s = "acopy".intern();
-
-    obj.put(vm, s, f, false);
-
-    let f = make_prim(vm, builtin_amake as _, 1, false);
-    let s = "amake".intern();
-
-    obj.put(vm, s, f, false);
-
-    let f = make_prim(vm, builtin_amake2 as _, 2, false);
-    let s = "amake2".intern();
-
-    obj.put(vm, s, f, false);
-
-    let f = make_prim(vm, builtin_array as _, 0, true);
-    let s = "array".intern();
-
-    obj.put(vm, s, f, false);
-
-    let f = make_prim(vm, builtin_asize as _, 1, false);
-    let s = "asize".intern();
-
-    obj.put(vm, s, f, false);
 
     let f = make_prim(vm, builtin_full_gc as _, 0, false);
     let s = "fullGC".intern();
@@ -641,7 +588,7 @@ pub(crate) fn init_builtin(vm: &mut VM) {
 
     obj.put(vm, s, f, false);
 
-    let f = make_prim(vm, ffi_open as _, 0, true);
+    let f = make_prim(vm, ffi_open as _, 1, false);
     let s = "ffi_open".intern();
 
     obj.put(vm, s, f, false);
@@ -701,5 +648,5 @@ pub(crate) fn init_builtin(vm: &mut VM) {
 
     obj.put(vm, s, f, false);
 
-    vm.builtins = Value::Object(obj.get_copy());
+    vm.builtins = Value::new(obj.get_copy());
 }

@@ -4,3 +4,4 @@ pub mod float;
 pub mod int;
 pub mod number;
 pub mod object;
+pub mod string;

@@ -142,7 +142,7 @@ pub(crate) fn type_size(id: i64) -> Result<Value, String> {
             _ => ffi_type_error!(id),
         }
     };
-    Ok(Value::Int(size as _))
+    Ok(Value::new(size as i32))
 }
 
 /// Returns the alignment of a type ID.
@@ -169,7 +169,7 @@ pub(crate) fn type_alignment(id: i64) -> Result<Value, String> {
         }
     };
 
-    Ok(Value::Int(size as _))
+    Ok(Value::new(size as i32))
 }
 
 /// A value of some sort to be passed to a C function.
@@ -391,7 +391,7 @@ impl Pointer {
     }
 
     unsafe fn read_signed_integer<T: Into<i64>>(self) -> Value {
-        Value::Int(self.read::<T>().into() as _)
+        Value::new(self.read::<T>().into() as i32)
     }
 
     unsafe fn read_float<T: Into<f64>>(self) -> Value {
@@ -421,11 +421,11 @@ impl Pointer {
             }
             TYPE_FLOAT => Value::Float(self.read::<f32>() as _),
             TYPE_DOUBLE => Value::Float(self.read::<f64>() as _),
-            TYPE_I8 | TYPE_U8 => Value::Int(self.read::<i8>() as _),
-            TYPE_I16 | TYPE_U16 => Value::Int(self.read::<i16>() as _),
-            TYPE_I32 | TYPE_U32 => Value::Int(self.read::<i32>() as _),
-            TYPE_I64 | TYPE_U64 => Value::Int(self.read::<i64>() as _),
-            TYPE_SIZE_T => Value::Int(self.read::<usize>() as _),
+            TYPE_I8 | TYPE_U8 => Value::new(self.read::<i8>() as i32),
+            TYPE_I16 | TYPE_U16 => Value::new(self.read::<i16>() as i32),
+            TYPE_I32 | TYPE_U32 => Value::new(self.read::<i32>() as i32),
+            TYPE_I64 | TYPE_U64 => Value::new(self.read::<i64>() as f64),
+            TYPE_SIZE_T => Value::new(self.read::<usize>() as i32),
             _ => ffi_type_error!(kind.get_int32() as i64),
         };
         Ok(pointer)
@@ -631,7 +631,7 @@ impl Function {
             sint8 | sint16 | sint32 | sint64 | uint8 | uint16 | uint32 | uint64 => {
                 let result: c_long = ffi_call(cif_ptr, fun_ptr, args_ptr);
 
-                Value::Int(
+                Value::new(
                     result as u32 as i32
                 )
             }
